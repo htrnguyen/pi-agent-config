@@ -223,12 +223,63 @@ export default function (pi: ExtensionAPI) {
   let turnStartTime = 0;
   let lastTurnTokPerSec = 0;
 
+  let idleCompactTimer: ReturnType<typeof setTimeout> | undefined;
+  const IDLE_COMPACT_DELAY_MS = 180_000;
+  const IDLE_COMPACT_THRESHOLD_TOKENS = 90_000;
+
+  function clearIdleCompactTimer() {
+    if (idleCompactTimer) {
+      clearTimeout(idleCompactTimer);
+      idleCompactTimer = undefined;
+    }
+  }
+
+  function scheduleIdleCompact(ctx: ExtensionContext) {
+    clearIdleCompactTimer();
+    const settings = readJson(SETTINGS_PATH);
+    if (settings.compaction?.enabled === false) return;
+    idleCompactTimer = setTimeout(() => {
+      idleCompactTimer = undefined;
+      if (compactingNow) return;
+      const usage = ctx.getContextUsage();
+      const currentTokens = usage?.tokens ?? null;
+      if (currentTokens === null) return;
+      const modelWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 200_000;
+      const idleThreshold = Math.min(IDLE_COMPACT_THRESHOLD_TOKENS, Math.floor(modelWindow * 0.65));
+      if (currentTokens < idleThreshold) return;
+
+      compactingNow = true;
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `Idle compact: ${Math.round(currentTokens / 1000)}k >= ${Math.round(idleThreshold / 1000)}k — đang tự động nén nhẹ...`,
+          "info",
+        );
+      }
+      ctx.compact({
+        onComplete: () => {
+          compactingNow = false;
+          activeTui?.requestRender();
+        },
+        onError: () => {
+          compactingNow = false;
+        },
+      });
+    }, IDLE_COMPACT_DELAY_MS);
+  }
+
+  pi.on("input", () => {
+    clearIdleCompactTimer();
+    return { action: "continue" };
+  });
+
   pi.on("agent_start", () => {
+    clearIdleCompactTimer();
     activeTui?.requestRender();
   });
 
-  pi.on("agent_settled", () => {
+  pi.on("agent_settled", (_event, ctx) => {
     activeTui?.requestRender();
+    scheduleIdleCompact(ctx);
   });
 
   pi.on("turn_start", () => {
@@ -309,6 +360,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    clearIdleCompactTimer();
     activeTui = undefined;
   });
 

@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
@@ -179,10 +179,88 @@ function inferRoleFromTask(promptText: string, hasImages: boolean, cfg: RolesCon
 	return undefined;
 }
 
+const ROUTER_TIMEOUT_MS = 2500;
+const SHORT_FOLLOWUP_REGEX =
+	/^(ok|oke|okay|yes|yep|yeah|no|nope|tiếp|tiếp tục|làm đi|triển khai|triển khai ngay|đúng rồi|chuẩn|sửa nốt|sửa đi|chạy lại|thử lại|vẫn lỗi|vẫn lỗi kìa|xem lại|làm tiếp|continue|go ahead|do it|proceed|lgtm)[.!?\s]*$/i;
+
+const ROUTER_SYSTEM_PROMPT = `You are a semantic intent router for a software engineering AI agent.
+Given the user's message and the currently active role, output ONLY ONE label from:
+KEEP, default, coding, plan, slow, advisor
+
+Rules:
+- KEEP: Short follow-ups, confirmations, or continuations of the current task (e.g., "ok", "làm đi", "tiếp tục", "vẫn lỗi kìa", "sửa nốt").
+- default: Questions, explanations, reading/exploring code, or general chat where NO code edit is requested.
+- coding: Writing, editing, refactoring, fixing bugs, implementing features, or pasting errors to fix.
+- plan: Explicitly asking for a multi-step architecture plan, design blueprint, or implementation roadmap BEFORE coding.
+- slow: Deeply complex bugs or audits: race conditions, deadlocks, memory leaks, segfaults/crash dumps, or hard distributed/system debugging.
+- advisor: Asking to review code, audit git diff, check security, or verify implementation quality without editing.
+
+Output ONLY the single exact label.`;
+
+async function classifyTaskSemantically(
+	promptText: string,
+	currentRole: string,
+	cfg: RolesConfigFile,
+	ctx: ExtensionContext,
+): Promise<string | undefined> {
+	const trimmed = promptText.trim();
+	if (!trimmed) return undefined;
+	if (trimmed.length <= 45 && SHORT_FOLLOWUP_REGEX.test(trimmed)) {
+		return "KEEP";
+	}
+
+	const classifierRole =
+		(cfg.modelRoles.tiny && "tiny") || (cfg.modelRoles.smol && "smol") || (cfg.modelRoles.default && "default");
+	if (!classifierRole) return undefined;
+
+	const resolved = resolvePhysicalFromRole(classifierRole, cfg, ctx);
+	if (!resolved) return undefined;
+
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), ROUTER_TIMEOUT_MS);
+	try {
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: `Current role: ${currentRole}\nUser message:\n${trimmed.slice(0, 1200)}`,
+				},
+			],
+			timestamp: Date.now(),
+		};
+		const response = await ctx.modelRegistry.complete(
+			resolved.model,
+			{ systemPrompt: ROUTER_SYSTEM_PROMPT, messages: [userMessage] },
+			{ signal: controller.signal, maxTokens: 12 },
+		);
+		const raw = response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join(" ")
+			.trim();
+		const token = raw.split(/[\s,.:;!?]+/)[0];
+		if (!token) return undefined;
+		if (token.toUpperCase() === "KEEP") return "KEEP";
+		const normalized = token.toLowerCase();
+		if (["default", "coding", "plan", "slow", "advisor"].includes(normalized) && cfg.modelRoles[normalized]) {
+			return normalized;
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let cfg = loadRolesConfig();
 	let currentRole: string = cfg.defaultRole ?? "coding";
 	let temporarilyRemovedWriteTools: string[] = [];
+	let manualRoleLock = false;
+	let consecutiveToolFailures = 0;
+	let failureEscalatedThisRun = false;
 
 	function syncReadOnlyTools(readOnly: boolean) {
 		const active = new Set(pi.getActiveTools());
@@ -270,11 +348,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// Task-aware routing when `autoRoute: true` or when image input requires a vision-capable model
+	// Task-aware semantic routing when `autoRoute: true` or when image input requires a vision-capable model
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension" || event.text.trim().startsWith("/")) {
 			return { action: "continue" };
 		}
+		consecutiveToolFailures = 0;
+		failureEscalatedThisRun = false;
 		cfg = loadRolesConfig(ctx.cwd);
 		const hasImages = Array.isArray(event.images) && event.images.length > 0;
 
@@ -284,13 +364,52 @@ export default function (pi: ExtensionAPI) {
 			return { action: "continue" };
 		}
 
-		if (cfg.autoRoute) {
-			const inferred = inferRoleFromTask(event.text, hasImages, cfg);
-			if (inferred && inferred !== currentRole) {
-				await applyRole(inferred, ctx, true);
+		if (cfg.autoRoute && !manualRoleLock) {
+			let decision = await classifyTaskSemantically(event.text, currentRole, cfg, ctx);
+			if (decision === "KEEP") {
+				return { action: "continue" };
+			}
+			if (!decision) {
+				decision = inferRoleFromTask(event.text, hasImages, cfg);
+			}
+			if (decision && decision !== currentRole) {
+				await applyRole(decision, ctx, true);
 			}
 		}
 		return { action: "continue" };
+	});
+
+	// Auto-escalate to `slow` if 3+ consecutive tool failures occur in one run
+	pi.on("tool_result", async (event, ctx) => {
+		if (event.isError) {
+			consecutiveToolFailures += 1;
+			if (
+				consecutiveToolFailures >= 3 &&
+				!failureEscalatedThisRun &&
+				!manualRoleLock &&
+				currentRole !== "slow" &&
+				cfg.modelRoles.slow
+			) {
+				failureEscalatedThisRun = true;
+				if (ctx.hasUI) {
+					ctx.ui.notify("3 lỗi tool liên tiếp — tự động nâng lên role [slow] để xử lý sâu hơn.", "warning");
+				}
+				await applyRole("slow", ctx, false);
+			}
+		} else {
+			consecutiveToolFailures = 0;
+		}
+	});
+
+	pi.on("agent_settled", async () => {
+		consecutiveToolFailures = 0;
+		failureEscalatedThisRun = false;
+	});
+
+	pi.on("session_start", async () => {
+		manualRoleLock = false;
+		consecutiveToolFailures = 0;
+		failureEscalatedThisRun = false;
 	});
 
 	// Register selectable virtual models `role/<name>` for every role in roles.json
@@ -424,8 +543,18 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// `/role auto` -> toggle semantic auto-route and clear manual lock
+			if (parts[0] === "auto") {
+				cfg.autoRoute = !cfg.autoRoute;
+				if (cfg.autoRoute) manualRoleLock = false;
+				saveGlobalRolesConfig(cfg);
+				ctx.ui.notify(`Auto-route set to ${cfg.autoRoute ? "ON (semantic)" : "OFF"}`, "info");
+				return;
+			}
+
 			// `/role <name>` -> direct switch
 			if (parts.length === 1) {
+				manualRoleLock = true;
 				await applyRole(parts[0], ctx, true);
 				return;
 			}
@@ -436,10 +565,22 @@ export default function (pi: ExtensionAPI) {
 				const ro = entry.readOnly ? " [read-only]" : "";
 				return `${marker}${name} -> ${entry.model}${ro} — ${entry.description ?? ""}`;
 			});
+			items.push("[Auto] Unlock manual override & re-enable semantic Auto-Route");
 			items.push("[Config] Configure a role's model & effort (/role config)");
 
-			const choice = await ctx.ui.select("Switch Active Task Role (Alt+R to cycle)", items);
+			const choice = await ctx.ui.select(
+				`Switch Active Task Role (Auto-Route: ${cfg.autoRoute ? "ON" : "OFF"} | Alt+R to cycle)`,
+				items,
+			);
 			if (!choice) return;
+
+			if (choice.startsWith("[Auto]")) {
+				manualRoleLock = false;
+				cfg.autoRoute = true;
+				saveGlobalRolesConfig(cfg);
+				ctx.ui.notify("Semantic Auto-Route enabled & manual lock cleared.", "info");
+				return;
+			}
 
 			if (choice.startsWith("[Config]")) {
 				await configureRoleInteractive();
@@ -447,6 +588,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const selectedRole = choice.replace(/^\*\s+/, "").trim().split(/\s+/)[0];
+			manualRoleLock = true;
 			await applyRole(selectedRole, ctx, true);
 		},
 	});

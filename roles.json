@@ -1,5 +1,5 @@
 {
-  "autoRoute": false,
+  "autoRoute": true,
   "advisorEnabled": true,
   "defaultRole": "default",
   "cycleOrder": [
@@ -70,11 +70,18 @@
       "description": "Image & UI analysis"
     },
     "commit": {
-      "model": "openai-codex/gpt-6-luna:low",
+      "model": "antigravity/gemini-3.5-flash-lite:low",
       "fallbacks": [
         "zai/glm-5.3-flash:low"
       ],
-      "description": "Git commit message generation"
+      "description": "Git commit message generation (ultra-light)"
+    },
+    "tiny": {
+      "model": "antigravity/gemini-3.5-flash-lite:low",
+      "fallbacks": [
+        "zai/glm-5.3-flash:low"
+      ],
+      "description": "Background semantic routing, summaries & micro-tasks"
     }
   }
 }

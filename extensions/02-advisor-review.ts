@@ -36,7 +36,7 @@ const PROTECTED_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx"]);
 const DOC_OR_NOTE_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc", ".log", ".csv"]);
 
 const DANGEROUS_BASH_REGEX =
-	/\b(rm\s+-[a-zA-Z]*r[a-zA-Z]*f|git\s+reset\s+--hard|git\s+push\s+.*--force|git\s+clean\s+-[a-zA-Z]*f|mkfs|dd\s+if=)/i;
+	/\b(rm\s+-[a-zA-Z]*r[a-zA-Z]*f|git\s+reset\s+--hard|git\s+push\s+.*(--force|-f\b)|git\s+clean\s+-[a-zA-Z]*f|git\s+checkout\s+--\s+\.|git\s+restore\s+\.|mkfs|dd\s+if=)/i;
 
 function isProtectedFile(rawPath: string): string | undefined {
 	const normalized = rawPath.replace(/\\/g, "/").trim();
