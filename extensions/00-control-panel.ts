@@ -482,15 +482,8 @@ export default function (pi: ExtensionAPI) {
         id: "role.default",
         label: "[Role] Active / Default Role",
         description: "Role đang dùng & mặc định khi mở Pi (dùng /role config để gán model+effort cho từng role)",
-        currentValue: String(roles.defaultRole ?? roleNames[0] ?? "coding"),
+        currentValue: String(roles.defaultRole ?? roleNames[0] ?? "default"),
         values: roleNames,
-      },
-      {
-        id: "role.autoRoute",
-        label: "[Role] Auto Route",
-        description: "off = luôn dùng đúng Role bạn chọn; on = tự động đoán Role theo câu lệnh",
-        currentValue: roles.autoRoute ? "on" : "off",
-        values: ["off", "on"],
       },
       {
         id: "model.thinking",
@@ -582,10 +575,6 @@ export default function (pi: ExtensionAPI) {
             r.defaultRole = newValue;
             writeJson(ROLES_PATH, r);
             pi.events.emit("role:apply", { role: newValue, ctx });
-          } else if (id === "role.autoRoute") {
-            const r = readJson(ROLES_PATH);
-            r.autoRoute = newValue === "on";
-            writeJson(ROLES_PATH, r);
           } else if (id === "model.thinking") {
             const s = readJson(SETTINGS_PATH);
             s.defaultThinkingLevel = newValue;

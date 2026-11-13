@@ -1,5 +1,4 @@
 {
-  "autoRoute": true,
   "advisorEnabled": true,
   "defaultRole": "default",
   "cycleOrder": [
@@ -7,7 +6,6 @@
     "coding",
     "plan",
     "slow",
-    "smol",
     "advisor"
   ],
   "modelRoles": {
@@ -16,14 +14,14 @@
       "fallbacks": [
         "antigravity/gemini-3.8-flash:low"
       ],
-      "description": "Fast daily tasks & questions ($0.1/$0.5 per 1M)"
+      "description": "Hỏi đáp, đọc hiểu codebase, phân tích ảnh & tác vụ nhanh hằng ngày ($0.1/$0.5 per 1M)"
     },
     "coding": {
       "model": "openai-codex/gpt-6.1-terra:medium",
       "fallbacks": [
         "antigravity/claude-sonnet-5-5:medium"
       ],
-      "description": "Main coding & refactoring (500k ctx, $1/$5 per 1M — half price of 5.6-terra)"
+      "description": "Viết code, sửa bug & refactor chính (500k ctx, $1/$5 per 1M)"
     },
     "plan": {
       "model": "genz-codex/gpt-6-astra:medium",
@@ -31,28 +29,14 @@
         "antigravity/claude-opus-5-5:medium"
       ],
       "readOnly": true,
-      "description": "Architecture & implementation planning (Read-only, GPT-6 Astra)"
+      "description": "Thiết kế kiến trúc & lập kế hoạch triển khai (Read-only, GPT-6 Astra)"
     },
     "slow": {
       "model": "openai-codex/gpt-6.1-sol:high",
       "fallbacks": [
         "genz-codex/gpt-6.1-terra:high"
       ],
-      "description": "Deep debugging, race conditions & hard architecture"
-    },
-    "smol": {
-      "model": "openai-codex/gpt-6-luna:low",
-      "fallbacks": [
-        "zai/glm-5.3-flash:low"
-      ],
-      "description": "Lightweight lookups, summaries & quick fixes ($0.1/$0.5 per 1M)"
-    },
-    "task": {
-      "model": "openai-codex/gpt-6-luna:low",
-      "fallbacks": [
-        "zai/glm-5.3-flash:low"
-      ],
-      "description": "Subagent background worker default"
+      "description": "Debug sâu, race condition, bài toán kiến trúc khó"
     },
     "advisor": {
       "model": "genz-codex/codex-auto-review:medium",
@@ -60,28 +44,7 @@
         "antigravity/claude-sonnet-5-5:medium"
       ],
       "readOnly": true,
-      "description": "Code review, security audit & quality verification (Read-only)"
-    },
-    "vision": {
-      "model": "openai-codex/gpt-6-luna:low",
-      "fallbacks": [
-        "antigravity/gemini-3.8-flash:low"
-      ],
-      "description": "Image & UI analysis"
-    },
-    "commit": {
-      "model": "antigravity/gemini-3.5-flash-lite:low",
-      "fallbacks": [
-        "zai/glm-5.3-flash:low"
-      ],
-      "description": "Git commit message generation (ultra-light)"
-    },
-    "tiny": {
-      "model": "antigravity/gemini-3.5-flash-lite:low",
-      "fallbacks": [
-        "zai/glm-5.3-flash:low"
-      ],
-      "description": "Background semantic routing, summaries & micro-tasks"
+      "description": "Review code, kiểm tra bảo mật & chất lượng (Read-only)"
     }
   }
 }
