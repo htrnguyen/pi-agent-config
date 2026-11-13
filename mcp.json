@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "context7": {
+      "headers": {
+        "Authorization": "!printf 'Bearer %s' \"$(secret-tool lookup service context7)\""
+      },
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    }
+  }
+}

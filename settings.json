@@ -1,0 +1,100 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "lastChangelogVersion": "1.5.2",
+  "defaultProvider": "openai-codex",
+  "defaultModel": "gpt-6-luna",
+  "defaultThinkingLevel": "medium",
+  "hideThinkingBlock": true,
+  "quietStartup": "header",
+  "extensions": [
+    "-builtin:mcp"
+  ],
+  "skills": [
+    "!~/.agents/skills/**"
+  ],
+  "defaultTools": [
+    "+codemode",
+    "+tool_search"
+  ],
+  "subagents": {
+    "defaultModel": "zai/glm-5.3-flash",
+    "defaultThinking": "low",
+    "agentOverrides": {
+      "scout": {
+        "model": "zai/glm-5.3-flash",
+        "thinking": "low"
+      },
+      "researcher": {
+        "model": "openai-codex/gpt-5.6-luna",
+        "thinking": "low"
+      },
+      "worker": {
+        "model": "openai-codex/gpt-6-luna",
+        "thinking": "medium"
+      },
+      "delegate": {
+        "model": "openai-codex/gpt-5.6-luna",
+        "thinking": "low"
+      },
+      "reviewer": {
+        "model": "genz-codex/codex-auto-review",
+        "thinking": "medium"
+      },
+      "oracle": {
+        "model": "genz-codex/gpt-6.1-sol",
+        "thinking": "high"
+      },
+      "advisor": {
+        "model": "genz-codex/codex-auto-review",
+        "thinking": "medium"
+      },
+      "evidence-auditor": {
+        "model": "genz-codex/gpt-6.1-terra",
+        "thinking": "medium"
+      }
+    }
+  },
+  "packages": [
+    "npm:pi-mcp-adapter",
+    "npm:@vigolium/piolium",
+    "npm:pi-web-access",
+    "npm:pi-subagents",
+    "npm:context-mode",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@juicesharp/rpiv-todo",
+    "npm:pi-lens",
+    "npm:@plannotator/pi-extension",
+    "npm:pi-goal-x",
+    "npm:pi-observational-memory",
+    "npm:pi-project-memory",
+    "npm:pi-antigravity",
+    "npm:pi-usage"
+  ],
+  "extensionChangelogVersions": {
+    "{\"source\":\"npm:pi-mcp-adapter\",\"scope\":\"user\"}": "7.0.1",
+    "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0",
+    "{\"source\":\"npm:pi-subagents\",\"scope\":\"user\"}": "0.88.1",
+    "{\"source\":\"npm:pi-lens\",\"scope\":\"user\"}": "4.4.12"
+  },
+  "enableSkillCommands": false,
+  "autocompleteMaxVisible": 12,
+  "cacheWarming": "idle",
+  "doubleEscapeAction": "tree",
+  "fullscreenCopyOnSelect": true,
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "detailedHud": true,
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 24000,
+    "keepRecentTokens": 32000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 3,
+    "baseDelayMs": 2000,
+    "maxAgentDelayMs": 60000
+  },
+  "compactThresholdTokens": 120000
+}

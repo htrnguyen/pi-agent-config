@@ -1,0 +1,5 @@
+{
+  "$schema": "https://pi.dev/schemas/keybindings.schema.json",
+  "app.model.select": [],
+  "app.tree.filter.labeledOnly": []
+}

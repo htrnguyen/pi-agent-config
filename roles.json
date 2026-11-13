@@ -1,0 +1,80 @@
+{
+  "autoRoute": false,
+  "advisorEnabled": true,
+  "defaultRole": "default",
+  "cycleOrder": [
+    "default",
+    "coding",
+    "plan",
+    "slow",
+    "smol",
+    "advisor"
+  ],
+  "modelRoles": {
+    "default": {
+      "model": "openai-codex/gpt-6-luna:low",
+      "fallbacks": [
+        "antigravity/gemini-3.8-flash:low"
+      ],
+      "description": "Fast daily tasks & questions ($0.1/$0.5 per 1M)"
+    },
+    "coding": {
+      "model": "openai-codex/gpt-6.1-terra:medium",
+      "fallbacks": [
+        "antigravity/claude-sonnet-5-5:medium"
+      ],
+      "description": "Main coding & refactoring (500k ctx, $1/$5 per 1M — half price of 5.6-terra)"
+    },
+    "plan": {
+      "model": "openai-codex/gpt-6.1-sol:medium",
+      "fallbacks": [
+        "antigravity/claude-opus-5-5:medium"
+      ],
+      "readOnly": true,
+      "description": "Architecture & implementation planning (Read-only, 500k ctx)"
+    },
+    "slow": {
+      "model": "openai-codex/gpt-6.1-sol:high",
+      "fallbacks": [
+        "genz-codex/gpt-6.1-terra:high"
+      ],
+      "description": "Deep debugging, race conditions & hard architecture"
+    },
+    "smol": {
+      "model": "openai-codex/gpt-6-luna:low",
+      "fallbacks": [
+        "zai/glm-5.3-flash:low"
+      ],
+      "description": "Lightweight lookups, summaries & quick fixes ($0.1/$0.5 per 1M)"
+    },
+    "task": {
+      "model": "openai-codex/gpt-6-luna:low",
+      "fallbacks": [
+        "zai/glm-5.3-flash:low"
+      ],
+      "description": "Subagent background worker default"
+    },
+    "advisor": {
+      "model": "genz-codex/codex-auto-review:medium",
+      "fallbacks": [
+        "antigravity/claude-sonnet-5-5:medium"
+      ],
+      "readOnly": true,
+      "description": "Code review, security audit & quality verification (Read-only)"
+    },
+    "vision": {
+      "model": "openai-codex/gpt-6-luna:low",
+      "fallbacks": [
+        "antigravity/gemini-3.8-flash:low"
+      ],
+      "description": "Image & UI analysis"
+    },
+    "commit": {
+      "model": "openai-codex/gpt-6-luna:low",
+      "fallbacks": [
+        "zai/glm-5.3-flash:low"
+      ],
+      "description": "Git commit message generation"
+    }
+  }
+}

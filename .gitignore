@@ -1,0 +1,23 @@
+# Secrets & Credentials (DO NOT COMMIT)
+auth.json
+mcp-auth.json
+antigravity-accounts.json
+models.json
+*.key
+*.pem
+.env*
+
+# Runtime, Installed Packages & Session State
+node_modules/
+npm/
+sessions/
+project-memory/
+pi-subagents/
+pi-web-access/
+mcp.log*
+mcp-cache.json
+mcp-last-seen-version.json
+mcp-onboarding.json
+models-store.json
+model-stats.json
+trust.json
