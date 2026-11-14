@@ -8,6 +8,12 @@
     "thinking": "low",
     "mode": "suggest-only",
     "confidenceThreshold": 0.85,
+    "thresholds": {
+      "toPaid": 0.9,
+      "fromPaid": 0.75,
+      "toCoding": 0.8,
+      "default": 0.85
+    },
     "maxSuggestionsPerTask": 1,
     "timeoutMs": 2200,
     "onFailure": "keep-current-role",

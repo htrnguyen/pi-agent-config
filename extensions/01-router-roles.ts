@@ -37,6 +37,12 @@ interface AdvisoryRouterConfig {
 	thinking: ThinkingLevel;
 	mode: "suggest-only";
 	confidenceThreshold: number;
+	thresholds?: {
+		toPaid?: number;
+		fromPaid?: number;
+		toCoding?: number;
+		default?: number;
+	};
 	maxSuggestionsPerTask: number;
 	timeoutMs: number;
 	onFailure: "keep-current-role";
@@ -102,6 +108,12 @@ const DEFAULT_ADVISORY_ROUTER: AdvisoryRouterConfig = {
 	thinking: "low",
 	mode: "suggest-only",
 	confidenceThreshold: 0.85,
+	thresholds: {
+		toPaid: 0.9,
+		fromPaid: 0.75,
+		toCoding: 0.8,
+		default: 0.85,
+	},
 	maxSuggestionsPerTask: 1,
 	timeoutMs: 2200,
 	onFailure: "keep-current-role",
@@ -109,6 +121,20 @@ const DEFAULT_ADVISORY_ROUTER: AdvisoryRouterConfig = {
 	paidRoles: ["plan", "slow"],
 	neverAutoSwitch: true,
 };
+
+function getEffectiveThreshold(
+	currentRole: string,
+	targetRole: string,
+	adv: AdvisoryRouterConfig,
+): number {
+	const t = adv.thresholds ?? {};
+	const fromPaid = adv.paidRoles.includes(currentRole);
+	const toPaid = adv.paidRoles.includes(targetRole);
+	if (toPaid) return t.toPaid ?? 0.9;
+	if (fromPaid && (targetRole === "default" || targetRole === "coding")) return t.fromPaid ?? 0.75;
+	if (currentRole === "default" && targetRole === "coding") return t.toCoding ?? 0.8;
+	return t.default ?? adv.confidenceThreshold ?? 0.85;
+}
 
 function getAdvisoryConfig(cfg: RolesConfigFile): AdvisoryRouterConfig {
 	return { ...DEFAULT_ADVISORY_ROUTER, ...(cfg.advisoryRouter ?? {}) };
@@ -390,20 +416,44 @@ export default function (pi: ExtensionAPI) {
 		// Tier 2: Lightweight GLM Flash classification (with cache + timeout fallback)
 		const cacheKey = `${currentRole}::${trimmed.slice(0, 300)}`;
 		let result = decisionCache.get(cacheKey);
+		let latencyMs = 0;
 		if (!result) {
+			const t0 = Date.now();
 			result = await classifyWithAdvisoryRouter(trimmed, currentRole, adv, cfg, ctx);
-			if (result) {
-				if (decisionCache.size >= 25) {
-					const oldest = decisionCache.keys().next().value;
-					if (oldest) decisionCache.delete(oldest);
-				}
-				decisionCache.set(cacheKey, result);
+			latencyMs = Date.now() - t0;
+			if (!result) {
+				appendAdvisoryLog({
+					ts: new Date().toISOString(),
+					outcome: "timeout_or_error",
+					currentRole,
+					latencyMs,
+					promptPreview: trimmed.slice(0, 120),
+				});
+				return { action: "continue" };
 			}
+			if (decisionCache.size >= 25) {
+				const oldest = decisionCache.keys().next().value;
+				if (oldest) decisionCache.delete(oldest);
+			}
+			decisionCache.set(cacheKey, result);
 		}
 
-		if (!result) return { action: "continue" };
 		if (result.role === currentRole) return { action: "continue" };
-		if (result.confidence < adv.confidenceThreshold) return { action: "continue" };
+
+		const threshold = getEffectiveThreshold(currentRole, result.role, adv);
+		if (result.confidence < threshold) {
+			appendAdvisoryLog({
+				ts: new Date().toISOString(),
+				outcome: "below_threshold",
+				currentRole,
+				suggestedRole: result.role,
+				confidence: result.confidence,
+				threshold,
+				latencyMs,
+				promptPreview: trimmed.slice(0, 120),
+			});
+			return { action: "continue" };
+		}
 
 		const pairKey = `${currentRole}->${result.role}`;
 		if (declinedSuggestions.has(pairKey)) return { action: "continue" };
@@ -436,9 +486,12 @@ export default function (pi: ExtensionAPI) {
 		const accepted = Boolean(choice?.startsWith("Yes"));
 		appendAdvisoryLog({
 			ts: new Date().toISOString(),
+			outcome: "suggested",
 			currentRole,
 			suggestedRole: result.role,
 			confidence: result.confidence,
+			threshold,
+			latencyMs,
 			reason: result.reason,
 			accepted,
 			promptPreview: trimmed.slice(0, 120),
