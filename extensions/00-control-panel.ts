@@ -409,6 +409,37 @@ export default function (pi: ExtensionAPI) {
         activeTui = tui;
       }
 
+      private shouldCollapsePaste(text: string): boolean {
+        const normalized = text
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n")
+          .replace(/\t/g, "    ");
+        const lines = normalized.split("\n");
+        return lines.length > 20 || normalized.length > 400;
+      }
+
+      insertTextAtCursor(text: string): void {
+        if (text && this.shouldCollapsePaste(text)) {
+          this.handlePaste(text);
+          return;
+        }
+        super.insertTextAtCursor(text);
+      }
+
+      handleInput(data: string): void {
+        const self = this as any;
+        const looksLikeRawPaste =
+          !self.isInPaste &&
+          !data.startsWith("\x1b") &&
+          !data.includes("\x1b[200~") &&
+          (data.length > 400 || (data.length > 1 && (data.includes("\n") || data.includes("\r"))));
+        if (looksLikeRawPaste) {
+          this.handlePaste(data);
+          return;
+        }
+        super.handleInput(data);
+      }
+
       handlePaste(pastedText: string): void {
         const normalized = pastedText
           .replace(/\r\n/g, "\n")

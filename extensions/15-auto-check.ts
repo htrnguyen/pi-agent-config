@@ -290,19 +290,43 @@ function checkJson(absPath: string): CheckIssue[] {
 export default function (pi: ExtensionAPI) {
 	let enabled = true;
 
+	function getActiveToolsLabel(): string {
+		const active: string[] = [];
+		if (findGlobalBin("ruff")) active.push("ruff");
+		if (findGlobalBin("ty")) active.push("ty");
+		if (findGlobalBin("node")) active.push("node");
+		return active.length > 0 ? active.join(",") : "basic";
+	}
+
+	function updateCheckStatus(ctx: ExtensionContext, warningText?: string) {
+		if (!ctx.hasUI) return;
+		if (!enabled) {
+			ctx.ui.setStatus("auto-check", ctx.ui.theme.fg("dim", "check:off"));
+			return;
+		}
+		if (warningText) {
+			ctx.ui.setStatus("auto-check", ctx.ui.theme.fg("warning", warningText));
+			return;
+		}
+		ctx.ui.setStatus(
+			"auto-check",
+			ctx.ui.theme.fg("success", `check:on(${getActiveToolsLabel()})`),
+		);
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		updateCheckStatus(ctx);
+	});
+
 	pi.registerCommand("autocheck", {
 		description: "Toggle or inspect lightweight post-edit auto-check (on|off|status)",
 		handler: async (args, ctx) => {
 			const arg = (args ?? "").trim().toLowerCase();
 			if (arg === "on") enabled = true;
-			else if (arg === "off") {
-				enabled = false;
-				if (ctx.hasUI) ctx.ui.setStatus("auto-check", undefined);
-			}
-			const ruffBin = findGlobalBin("ruff") ? "ruff" : "no-ruff";
-			const tyBin = findGlobalBin("ty") ? "ty" : "no-ty";
+			else if (arg === "off") enabled = false;
+			updateCheckStatus(ctx);
 			ctx.ui.notify(
-				`Auto-check: ${enabled ? "ON" : "OFF"} (global: ${ruffBin}, ${tyBin})`,
+				`Auto-check: ${enabled ? "ON" : "OFF"} (tools: ${getActiveToolsLabel()})`,
 				"info",
 			);
 		},
@@ -347,14 +371,12 @@ export default function (pi: ExtensionAPI) {
 		const relPath = path.relative(ctx.cwd, absPath) || path.basename(absPath);
 
 		if (issues.length === 0) {
-			if (ctx.hasUI) ctx.ui.setStatus("auto-check", undefined);
+			updateCheckStatus(ctx);
 			return;
 		}
 
-		if (ctx.hasUI) {
-			const tools = issues.map((i) => i.tool).join(",");
-			ctx.ui.setStatus("auto-check", `⚠ ${path.basename(absPath)} (${tools})`);
-		}
+		const tools = issues.map((i) => i.tool).join(",");
+		updateCheckStatus(ctx, `check:⚠ ${path.basename(absPath)} (${tools})`);
 
 		let report = issues
 			.map((i) => `[${i.tool}]\n${i.output}`)
