@@ -12,39 +12,39 @@
     "default": {
       "model": "openai-codex/gpt-6-luna:low",
       "fallbacks": [
-        "antigravity/gemini-3.8-flash:low"
+        "zai/glm-5.3-flash:low"
       ],
-      "description": "Hỏi đáp, đọc hiểu codebase, phân tích ảnh & tác vụ nhanh hằng ngày ($0.1/$0.5 per 1M)"
+      "description": "Hỏi đáp, đọc hiểu codebase, phân tích ảnh & tác vụ hằng ngày (Codex Plus)"
     },
     "coding": {
-      "model": "openai-codex/gpt-6.1-terra:medium",
+      "model": "openai-codex/gpt-6-luna:medium",
       "fallbacks": [
-        "antigravity/claude-sonnet-5-5:medium"
+        "antigravity/gemini-3.8-flash:medium"
       ],
-      "description": "Viết code, sửa bug & refactor chính (500k ctx, $1/$5 per 1M)"
+      "description": "Implement, sửa bug & refactor chính (Codex Plus)"
     },
     "plan": {
-      "model": "openai-codex/gpt-6.1-sol:medium",
+      "model": "genz-codex/gpt-6.1-sol:high",
       "fallbacks": [
-        "antigravity/claude-opus-5-5:medium"
+        "openai-codex/gpt-6-luna:high"
       ],
       "readOnly": true,
-      "description": "Thiết kế kiến trúc & lập kế hoạch triển khai (Read-only, 500k ctx)"
+      "description": "Thiết kế kiến trúc & lập kế hoạch triển khai (Read-only, Sol)"
     },
     "slow": {
-      "model": "openai-codex/gpt-6.1-sol:high",
+      "model": "genz-codex/gpt-6.1-terra:high",
       "fallbacks": [
-        "genz-codex/gpt-6.1-terra:high"
+        "openai-codex/gpt-6-luna:high"
       ],
-      "description": "Debug sâu, race condition, bài toán kiến trúc khó"
+      "description": "Debug sâu, race condition, bài toán kiến trúc khó (Terra)"
     },
     "advisor": {
-      "model": "genz-codex/codex-auto-review:medium",
+      "model": "antigravity/gemini-3.8-flash:high",
       "fallbacks": [
-        "antigravity/claude-sonnet-5-5:medium"
+        "zai/glm-5.3-flash:high"
       ],
       "readOnly": true,
-      "description": "Review code, kiểm tra bảo mật & chất lượng (Read-only)"
+      "description": "Review code độc lập, tìm edge cases & regression (Read-only)"
     }
   }
 }

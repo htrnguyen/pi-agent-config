@@ -38,6 +38,12 @@ const DOC_OR_NOTE_EXTENSIONS = new Set([".md", ".mdx", ".txt", ".rst", ".adoc", 
 const DANGEROUS_BASH_REGEX =
 	/\b(rm\s+-[a-zA-Z]*r[a-zA-Z]*f|git\s+reset\s+--hard|git\s+push\s+.*(--force|-f\b)|git\s+clean\s+-[a-zA-Z]*f|git\s+checkout\s+--\s+\.|git\s+restore\s+\.|mkfs|dd\s+if=)/i;
 
+const VERIFICATION_CMD_REGEX =
+	/\b(pytest|vitest|jest|mocha|ava|tap|tsc(\s|$)|eslint|ruff|mypy|pyright|flake8|biome\s+check|cargo\s+(test|check|clippy)|go\s+test|make\s+test|(npm|pnpm|yarn|bun)\s+(test|run\s+(test|typecheck|check|lint|build|verify)))\b/i;
+
+const MUTATING_BASH_IN_RO_REGEX =
+	/(\bsed\s+-i|\btee\s+|\brm\s+|\bmv\s+|\bcp\s+|\btouch\s+|\bmkdir\s+|\bchmod\s+|\bgit\s+(commit|reset|checkout|restore|apply|stash\s+pop)|(?<![0-9&])>>?\s*(?!\/dev\/null\b))/i;
+
 function isProtectedFile(rawPath: string): string | undefined {
 	const normalized = rawPath.replace(/\\/g, "/").trim();
 	if (!normalized) return undefined;
@@ -105,8 +111,29 @@ function saveAdvisorPref(enabled: boolean): void {
 export default function (pi: ExtensionAPI) {
 	let advisorEnabled = readAdvisorPref();
 	let modifiedCodeFiles = new Set<string>();
-	let verifiedAfterEdit = false;
+	let baselineDirtyFiles = new Set<string>();
+	let verificationCmdIds = new Set<string>();
+	let verificationAttempted = false;
+	let verificationPassed = false;
 	let advisorTriggeredThisRun = false;
+
+	async function snapshotGitDirtyFiles(): Promise<Set<string>> {
+		try {
+			const { stdout, code } = await pi.exec("git", ["status", "--porcelain"]);
+			if (code !== 0 || !stdout.trim()) return new Set();
+			const files = new Set<string>();
+			for (const line of stdout.split("\n")) {
+				const raw = line.slice(3).trim();
+				if (raw) {
+					const target = raw.includes(" -> ") ? raw.split(" -> ").pop()!.trim() : raw;
+					files.add(target);
+				}
+			}
+			return files;
+		} catch {
+			return new Set();
+		}
+	}
 
 	function updateAdvisorStatus(ctx: ExtensionContext) {
 		if (!ctx.hasUI) return;
@@ -116,7 +143,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
-	// 1. Guardrails: Protect sensitive paths & confirm dangerous bash commands
+	// 1. Guardrails: Protect sensitive paths, confirm dangerous bash, and enforce [RO] bash guard
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName === "write" || event.toolName === "edit") {
 			const filePath = String(event.input.path ?? "");
@@ -149,16 +176,39 @@ export default function (pi: ExtensionAPI) {
 					return { block: true, reason: "Command blocked by user confirmation gate." };
 				}
 			}
+
+			// Read-only role guard: when edit & write are disabled, confirm file-mutating bash commands
+			const activeTools = new Set(pi.getActiveTools());
+			const isReadOnlyRole = !activeTools.has("edit") && !activeTools.has("write");
+			if (isReadOnlyRole && MUTATING_BASH_IN_RO_REGEX.test(cmd)) {
+				if (!ctx.hasUI) {
+					return { block: true, reason: `Mutating bash command blocked in read-only role: ${cmd}` };
+				}
+				const ok = await ctx.ui.confirm(
+					"Read-Only Role Guard",
+					`Đang ở role Read-Only nhưng lệnh bash có dấu hiệu ghi/sửa file:\n\n$ ${cmd}\n\nVẫn cho phép chạy?`,
+				);
+				if (!ok) {
+					return { block: true, reason: "Mutating bash command blocked in read-only role." };
+				}
+			}
+
+			if (VERIFICATION_CMD_REGEX.test(cmd)) {
+				verificationCmdIds.add(event.toolCallId);
+			}
 		}
 
 		return undefined;
 	});
 
-	// 2. Track source code edits vs verification commands during a run
+	// 2. Track source code edits vs real verification commands during a run
 	pi.on("agent_start", async () => {
 		modifiedCodeFiles = new Set<string>();
-		verifiedAfterEdit = false;
+		verificationCmdIds = new Set<string>();
+		verificationAttempted = false;
+		verificationPassed = false;
 		advisorTriggeredThisRun = false;
+		baselineDirtyFiles = await snapshotGitDirtyFiles();
 	});
 
 	pi.on("tool_call", async (event) => {
@@ -166,34 +216,53 @@ export default function (pi: ExtensionAPI) {
 			const filePath = String(event.input.path ?? "");
 			if (isCodeFileRequiringVerification(filePath)) {
 				modifiedCodeFiles.add(filePath);
-				verifiedAfterEdit = false;
+				verificationAttempted = false;
+				verificationPassed = false;
 			}
 		}
 		return undefined;
 	});
 
 	pi.on("tool_execution_end", async (event) => {
-		if (event.isError) return;
-		if (event.toolName === "bash" && modifiedCodeFiles.size > 0) {
-			verifiedAfterEdit = true;
+		if (event.toolName === "bash" && verificationCmdIds.has(event.toolCallId)) {
+			verificationCmdIds.delete(event.toolCallId);
+			verificationAttempted = true;
+			verificationPassed = !event.isError;
 		}
 	});
 
-	// 3. Task-Aware Advisor Hook: Only triggers when actual source code was modified without verification
+	// 3. Two-state Verification Guard: checks both tool edits and new Git dirty source files
 	pi.on("agent_before_settle", async (event) => {
 		advisorEnabled = readAdvisorPref();
-		if (!advisorEnabled || modifiedCodeFiles.size === 0 || verifiedAfterEdit || advisorTriggeredThisRun) {
+		if (!advisorEnabled || advisorTriggeredThisRun) {
 			return;
 		}
+
+		// Also catch code files modified via bash (sed/python/redirect) during this run
+		const currentDirty = await snapshotGitDirtyFiles();
+		for (const filePath of currentDirty) {
+			if (!baselineDirtyFiles.has(filePath) && isCodeFileRequiringVerification(filePath)) {
+				modifiedCodeFiles.add(filePath);
+			}
+		}
+
+		if (modifiedCodeFiles.size === 0 || verificationPassed) {
+			return;
+		}
+
 		advisorTriggeredThisRun = true;
 		const fileList = [...modifiedCodeFiles].slice(0, 5).join(", ");
+		const msg = verificationAttempted
+			? `[Verification Guard]: Modified source files (${fileList}) and the last verification command FAILED. Fix the root cause and re-run the appropriate test/typecheck/lint command until it passes before finalizing.`
+			: `[Verification Guard]: Source files were modified (${fileList}) without running a real verification command afterward (e.g. pytest, tsc --noEmit, npm test, ruff/eslint). Run the relevant check before finalizing.`;
+
 		return {
 			entries: [
 				...event.entries,
 				{
 					type: "custom_message",
 					customType: "advisor-check",
-					content: `[Advisor Check]: Source files were modified (${fileList}) without running a verification command afterward. Run the relevant typecheck/linter/test (or inspect git diff if no test runner applies) to ensure zero regressions before finalizing.`,
+					content: msg,
 					display: false,
 				},
 			],
@@ -226,11 +295,13 @@ export default function (pi: ExtensionAPI) {
 				"Steps:",
 				"1. Inspect the modified files and diffs using `bash` (`git status --short`, `git diff`) and `read`.",
 				"2. Check for logic bugs, edge cases, security vulnerabilities, race conditions, and type/contract mismatches.",
-				"3. Output structured findings under:",
-				"   - **Critical (Must Fix)**",
-				"   - **Warnings (Should Fix)**",
-				"   - **Suggestions**",
-				"   - **Verdict**",
+				"3. For every genuine finding (do NOT invent issues if the code is sound), report:",
+				"   - **Severity** (`Critical` | `Warning` | `Suggestion`)",
+				"   - **File:Line**",
+				"   - **Issue & Impact**",
+				"   - **Evidence / Reproduction**",
+				"   - **Suggested Fix**",
+				"4. End with **Verdict** (`APPROVE` or `REQUEST_CHANGES`).",
 				"Do NOT modify any files during the review unless explicitly asked.",
 			].join("\n");
 

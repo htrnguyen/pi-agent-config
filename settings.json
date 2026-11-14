@@ -25,31 +25,15 @@
         "thinking": "low"
       },
       "researcher": {
-        "model": "openai-codex/gpt-5.6-luna",
+        "model": "antigravity/gemini-3.8-flash",
         "thinking": "low"
       },
       "worker": {
         "model": "openai-codex/gpt-6-luna",
         "thinking": "medium"
       },
-      "delegate": {
-        "model": "openai-codex/gpt-5.6-luna",
-        "thinking": "low"
-      },
       "reviewer": {
-        "model": "genz-codex/codex-auto-review",
-        "thinking": "medium"
-      },
-      "oracle": {
-        "model": "genz-codex/gpt-6.1-sol",
-        "thinking": "high"
-      },
-      "advisor": {
-        "model": "genz-codex/codex-auto-review",
-        "thinking": "medium"
-      },
-      "evidence-auditor": {
-        "model": "genz-codex/gpt-6.1-terra",
+        "model": "antigravity/gemini-3.8-flash",
         "thinking": "medium"
       }
     }
