@@ -295,6 +295,7 @@ export default function (pi: ExtensionAPI) {
 		if (findGlobalBin("ruff")) active.push("ruff");
 		if (findGlobalBin("ty")) active.push("ty");
 		if (findGlobalBin("node")) active.push("node");
+		if (findGlobalBin("shellcheck")) active.push("sh");
 		return active.length > 0 ? active.join(",") : "basic";
 	}
 
