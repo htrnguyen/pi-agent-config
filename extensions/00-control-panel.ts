@@ -702,7 +702,7 @@ export default function (pi: ExtensionAPI) {
             const info = this.imagePastes.get(id)!;
             pills.push(
               thm.fg("accent", "[") +
-                thm.fg("warning", ` img #${id}`) +
+                thm.fg("warning", ` ▣ img #${id}`) +
                 thm.fg("dim", " · ") +
                 thm.fg("text", info.label) +
                 " " +
@@ -722,7 +722,7 @@ export default function (pi: ExtensionAPI) {
             const previewPart = snippet ? `${thm.fg("dim", " · ")}${thm.fg("muted", `"${snippet}"`)}` : "";
             pills.push(
               thm.fg("accent", "[") +
-                thm.fg("success", ` paste #${id}`) +
+                thm.fg("success", ` ≡ paste #${id}`) +
                 thm.fg("dim", " · ") +
                 thm.fg("text", `${lineCount}L · ${sizeKb}`) +
                 previewPart +

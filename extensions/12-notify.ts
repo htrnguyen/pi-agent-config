@@ -11,8 +11,11 @@
 
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const PI_ICON_PATH = path.join(os.homedir(), ".pi", "agent", "pi-icon.svg");
 
 const SOUND_CANDIDATES = [
 	"/usr/share/sounds/freedesktop/stereo/complete.oga",
@@ -72,9 +75,10 @@ function sendDesktopAndTerminalNotify(title: string, body: string, withSound: bo
 	}
 
 	// Linux Desktop Notification (Hyprland/Omarchy/GNOME/KDE)
+	const icon = fs.existsSync(PI_ICON_PATH) ? PI_ICON_PATH : "utilities-terminal";
 	execFile(
 		"notify-send",
-		["-a", "Pi Agent", "-i", "utilities-terminal", title, body],
+		["-a", "Pi Agent", "-i", icon, title, body],
 		(err) => {
 			if (err) {
 				if (process.env.KITTY_WINDOW_ID) {
