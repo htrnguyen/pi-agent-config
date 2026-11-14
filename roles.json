@@ -1,6 +1,23 @@
 {
   "advisorEnabled": true,
   "defaultRole": "default",
+  "advisoryRouter": {
+    "enabled": true,
+    "provider": "zai",
+    "model": "glm-5.3-flash",
+    "thinking": "low",
+    "mode": "suggest-only",
+    "confidenceThreshold": 0.85,
+    "maxSuggestionsPerTask": 1,
+    "timeoutMs": 2200,
+    "onFailure": "keep-current-role",
+    "requireConfirmation": true,
+    "paidRoles": [
+      "plan",
+      "slow"
+    ],
+    "neverAutoSwitch": true
+  },
   "cycleOrder": [
     "default",
     "coding",

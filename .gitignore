@@ -20,4 +20,5 @@ mcp-last-seen-version.json
 mcp-onboarding.json
 models-store.json
 model-stats.json
+advisory-router-log.jsonl
 trust.json

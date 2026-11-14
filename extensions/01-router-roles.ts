@@ -5,9 +5,9 @@
  * dynamic read-only tool locking, and automatic single-fallback on HTTP 429/503/529.
  */
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model, UserMessage } from "@earendil-works/pi-ai";
 import {
 	CONFIG_DIR_NAME,
 	type ExtensionAPI,
@@ -30,9 +30,25 @@ interface RoleEntry {
 	description?: string;
 }
 
+interface AdvisoryRouterConfig {
+	enabled: boolean;
+	provider: string;
+	model: string;
+	thinking: ThinkingLevel;
+	mode: "suggest-only";
+	confidenceThreshold: number;
+	maxSuggestionsPerTask: number;
+	timeoutMs: number;
+	onFailure: "keep-current-role";
+	requireConfirmation: boolean;
+	paidRoles: string[];
+	neverAutoSwitch: boolean;
+}
+
 interface RolesConfigFile {
 	advisorEnabled?: boolean;
 	defaultRole?: string;
+	advisoryRouter?: Partial<AdvisoryRouterConfig>;
 	cycleOrder?: string[];
 	modelRoles: Record<string, RoleEntry>;
 }
@@ -79,11 +95,31 @@ function getConfigPath(cwd?: string): string {
 	return join(getAgentDir(), "roles.json");
 }
 
+const DEFAULT_ADVISORY_ROUTER: AdvisoryRouterConfig = {
+	enabled: true,
+	provider: "zai",
+	model: "glm-5.3-flash",
+	thinking: "low",
+	mode: "suggest-only",
+	confidenceThreshold: 0.85,
+	maxSuggestionsPerTask: 1,
+	timeoutMs: 2200,
+	onFailure: "keep-current-role",
+	requireConfirmation: true,
+	paidRoles: ["plan", "slow"],
+	neverAutoSwitch: true,
+};
+
+function getAdvisoryConfig(cfg: RolesConfigFile): AdvisoryRouterConfig {
+	return { ...DEFAULT_ADVISORY_ROUTER, ...(cfg.advisoryRouter ?? {}) };
+}
+
 function loadRolesConfig(cwd?: string): RolesConfigFile {
 	const globalPath = join(getAgentDir(), "roles.json");
 	const base: RolesConfigFile = {
 		advisorEnabled: true,
 		defaultRole: "default",
+		advisoryRouter: { ...DEFAULT_ADVISORY_ROUTER },
 		cycleOrder: ["default", "coding", "plan", "slow", "advisor"],
 		modelRoles: {},
 	};
@@ -97,6 +133,9 @@ function loadRolesConfig(cwd?: string): RolesConfigFile {
 				const raw = JSON.parse(readFileSync(p, "utf-8")) as Partial<RolesConfigFile>;
 				if (typeof raw.advisorEnabled === "boolean") base.advisorEnabled = raw.advisorEnabled;
 				if (typeof raw.defaultRole === "string") base.defaultRole = raw.defaultRole;
+				if (raw.advisoryRouter) {
+					base.advisoryRouter = { ...base.advisoryRouter, ...raw.advisoryRouter };
+				}
 				if (Array.isArray(raw.cycleOrder)) base.cycleOrder = raw.cycleOrder;
 				if (raw.modelRoles) Object.assign(base.modelRoles, raw.modelRoles);
 			} catch (err) {
@@ -136,10 +175,99 @@ function resolvePhysicalFromRole(
 	return undefined;
 }
 
+interface AdvisoryClassification {
+	role: string;
+	confidence: number;
+	reason: string;
+}
+
+const SHORT_FOLLOWUP_REGEX =
+	/^(ok|oke|okay|yes|yep|yeah|no|nope|tiếp|tiếp tục|làm đi|triển khai|triển khai ngay|đúng rồi|chuẩn|sửa nốt|sửa đi|chạy lại|thử lại|vẫn lỗi|vẫn lỗi kìa|xem lại|làm tiếp|continue|go ahead|do it|proceed|lgtm|done|thanks|cảm ơn)[.!?\s]*$/i;
+
+const ADVISORY_SYSTEM_PROMPT = `You are a lightweight advisory role classifier for a software engineering AI agent.
+Given the user's new request and the current active role, classify which role best fits the request and output ONLY valid JSON:
+{"role":"default|coding|plan|slow|advisor","confidence":0.0-1.0,"reason":"<brief 1-sentence Vietnamese explanation>"}
+
+Role definitions:
+- default: Questions, explanations, reading code, general chat, or simple queries (even asking "explain architecture of function X" belongs in default, NOT plan).
+- coding: Implementing features, writing/editing code, fixing normal bugs, refactoring.
+- plan: Explicitly designing large multi-component system architecture, major redesigns, or implementation roadmaps BEFORE coding.
+- slow: Deeply complex bugs, race conditions, deadlocks, memory leaks, crash dumps, or high-risk complex refactors.
+- advisor: Auditing, reviewing code/diffs, security checks, or independent quality verification without editing.
+
+If the prompt is ambiguous or a minor continuation, lower confidence (< 0.75). Output ONLY the JSON object.`;
+
+function appendAdvisoryLog(entry: Record<string, unknown>): void {
+	try {
+		const logPath = join(getAgentDir(), "advisory-router-log.jsonl");
+		appendFileSync(logPath, `${JSON.stringify(entry)}\n`, "utf-8");
+	} catch {
+		// ignore logging failures
+	}
+}
+
+async function classifyWithAdvisoryRouter(
+	promptText: string,
+	currentRole: string,
+	adv: AdvisoryRouterConfig,
+	cfg: RolesConfigFile,
+	ctx: ExtensionContext,
+): Promise<AdvisoryClassification | undefined> {
+	const model = ctx.modelRegistry.find(adv.provider, adv.model);
+	if (!model) return undefined;
+
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), adv.timeoutMs);
+	try {
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [
+				{
+					type: "text",
+					text: `Current role: ${currentRole}\nUser prompt:\n${promptText.trim().slice(0, 1000)}`,
+				},
+			],
+			timestamp: Date.now(),
+		};
+		const response = await ctx.modelRegistry.complete(
+			model,
+			{ systemPrompt: ADVISORY_SYSTEM_PROMPT, messages: [userMessage] },
+			{ signal: controller.signal, maxTokens: 120 },
+		);
+		const raw = response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join(" ")
+			.trim();
+		const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+		const parsed = JSON.parse(cleaned) as Partial<AdvisoryClassification>;
+		if (
+			typeof parsed.role === "string" &&
+			cfg.modelRoles[parsed.role] &&
+			typeof parsed.confidence === "number" &&
+			Number.isFinite(parsed.confidence)
+		) {
+			return {
+				role: parsed.role,
+				confidence: Math.max(0, Math.min(1, parsed.confidence)),
+				reason: typeof parsed.reason === "string" ? parsed.reason.trim() : "",
+			};
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let cfg = loadRolesConfig();
 	let currentRole: string = cfg.defaultRole ?? "default";
 	let temporarilyRemovedWriteTools: string[] = [];
+	const declinedSuggestions = new Set<string>();
+	const decisionCache = new Map<string, AdvisoryClassification>();
+	let suggestionsShownForRun = 0;
 
 	function syncReadOnlyTools(readOnly: boolean) {
 		const active = new Set(pi.getActiveTools());
@@ -227,19 +355,112 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// If user attached an image but current model doesn't support image input, auto-switch to default (vision-capable)
+	// 1. Vision auto-fallback + 2. Hybrid Advisory Router (Rule Gate -> GLM Flash -> Yes/No, never auto-switches)
 	pi.on("input", async (event, ctx) => {
 		if (event.source === "extension" || event.text.trim().startsWith("/")) {
 			return { action: "continue" };
 		}
+		cfg = loadRolesConfig(ctx.cwd);
 		const hasImages = Array.isArray(event.images) && event.images.length > 0;
 		if (hasImages && ctx.model && !ctx.model.input?.includes("image")) {
-			cfg = loadRolesConfig(ctx.cwd);
 			if (cfg.modelRoles.default) {
 				await applyRole("default", ctx, true);
 			}
+			return { action: "continue" };
 		}
+
+		const adv = getAdvisoryConfig(cfg);
+		if (!adv.enabled || !ctx.hasUI) return { action: "continue" };
+
+		const trimmed = event.text.trim();
+		if (!trimmed) return { action: "continue" };
+
+		// Tier 1: Fast Rule Gate (zero LLM calls)
+		if (trimmed.length <= 45 && SHORT_FOLLOWUP_REGEX.test(trimmed)) {
+			return { action: "continue" };
+		}
+		const isCurrentlyPaid = adv.paidRoles.includes(currentRole);
+		if (!isCurrentlyPaid && trimmed.length < 25) {
+			return { action: "continue" };
+		}
+		if (suggestionsShownForRun >= adv.maxSuggestionsPerTask) {
+			return { action: "continue" };
+		}
+
+		// Tier 2: Lightweight GLM Flash classification (with cache + timeout fallback)
+		const cacheKey = `${currentRole}::${trimmed.slice(0, 300)}`;
+		let result = decisionCache.get(cacheKey);
+		if (!result) {
+			result = await classifyWithAdvisoryRouter(trimmed, currentRole, adv, cfg, ctx);
+			if (result) {
+				if (decisionCache.size >= 25) {
+					const oldest = decisionCache.keys().next().value;
+					if (oldest) decisionCache.delete(oldest);
+				}
+				decisionCache.set(cacheKey, result);
+			}
+		}
+
+		if (!result) return { action: "continue" };
+		if (result.role === currentRole) return { action: "continue" };
+		if (result.confidence < adv.confidenceThreshold) return { action: "continue" };
+
+		const pairKey = `${currentRole}->${result.role}`;
+		if (declinedSuggestions.has(pairKey)) return { action: "continue" };
+
+		// Always ask Yes/No — never auto-switch
+		const currentEntry = cfg.modelRoles[currentRole];
+		const targetEntry = cfg.modelRoles[result.role];
+		const targetPaid = adv.paidRoles.includes(result.role);
+		const costTag = targetPaid
+			? "Paid API (genz-codex)"
+			: isCurrentlyPaid
+				? "Tiết kiệm API (rời khỏi Paid role)"
+				: "Codex Plus / Free";
+
+		const title = [
+			`Role suggestion (${Math.round(result.confidence * 100)}%)`,
+			`Current: ${currentRole} (${currentEntry?.model ?? "unknown"})`,
+			`Suggested: ${result.role} (${targetEntry?.model ?? "unknown"}) · ${costTag}`,
+			result.reason ? `Lý do: ${result.reason}` : "",
+		]
+			.filter(Boolean)
+			.join("\n");
+
+		suggestionsShownForRun += 1;
+		const choice = await ctx.ui.select(title, [
+			`Yes — Chuyển sang [${result.role}]${targetPaid ? " (Paid API)" : ""}`,
+			`No — Giữ nguyên [${currentRole}]`,
+		]);
+
+		const accepted = Boolean(choice?.startsWith("Yes"));
+		appendAdvisoryLog({
+			ts: new Date().toISOString(),
+			currentRole,
+			suggestedRole: result.role,
+			confidence: result.confidence,
+			reason: result.reason,
+			accepted,
+			promptPreview: trimmed.slice(0, 120),
+		});
+
+		if (accepted) {
+			await applyRole(result.role, ctx, true);
+		} else {
+			declinedSuggestions.add(pairKey);
+		}
+
 		return { action: "continue" };
+	});
+
+	pi.on("agent_settled", async () => {
+		suggestionsShownForRun = 0;
+	});
+
+	pi.on("session_start", async () => {
+		declinedSuggestions.clear();
+		decisionCache.clear();
+		suggestionsShownForRun = 0;
 	});
 
 	// Register selectable virtual models `role/<name>` for every role in roles.json
@@ -373,8 +594,22 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			// `/role advisory` -> toggle Hybrid Advisory Router (suggest-only)
+			if (parts[0] === "advisory") {
+				const adv = getAdvisoryConfig(cfg);
+				adv.enabled = !adv.enabled;
+				cfg.advisoryRouter = adv;
+				saveGlobalRolesConfig(cfg);
+				ctx.ui.notify(
+					`Advisory Router (suggest-only): ${adv.enabled ? "ON (glm-5.3-flash)" : "OFF"}`,
+					"info",
+				);
+				return;
+			}
+
 			// `/role <name>` -> direct switch
 			if (parts.length === 1) {
+				declinedSuggestions.clear();
 				await applyRole(parts[0], ctx, true);
 				return;
 			}
