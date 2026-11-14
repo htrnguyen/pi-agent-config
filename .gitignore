@@ -14,6 +14,7 @@ sessions/
 project-memory/
 backups/
 pi-subagents/
+missions/
 pi-web-access/
 mcp.log*
 mcp-cache.json
