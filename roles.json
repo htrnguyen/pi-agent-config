@@ -24,12 +24,12 @@
       "description": "Viết code, sửa bug & refactor chính (500k ctx, $1/$5 per 1M)"
     },
     "plan": {
-      "model": "genz-codex/gpt-6-astra:medium",
+      "model": "openai-codex/gpt-6.1-sol:medium",
       "fallbacks": [
         "antigravity/claude-opus-5-5:medium"
       ],
       "readOnly": true,
-      "description": "Thiết kế kiến trúc & lập kế hoạch triển khai (Read-only, GPT-6 Astra)"
+      "description": "Thiết kế kiến trúc & lập kế hoạch triển khai (Read-only, 500k ctx)"
     },
     "slow": {
       "model": "openai-codex/gpt-6.1-sol:high",
