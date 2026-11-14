@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 interface BgJob {
@@ -71,6 +72,8 @@ export default function bgBashExtension(pi: ExtensionAPI) {
 	let tickPhase = 0;
 	let uiTimer: ReturnType<typeof setInterval> | null = null;
 	let activeCtx: ExtensionContext | null = null;
+	let widgetRegistered = false;
+	let widgetTui: { requestRender?: () => void } | null = null;
 
 	function runningJobs(): BgJob[] {
 		return Array.from(jobs.values()).filter((j) => j.status === "running");
@@ -89,47 +92,62 @@ export default function bgBashExtension(pi: ExtensionAPI) {
 		const running = runningJobs();
 		if (running.length === 0) {
 			stopUiTimer();
-			ctx.ui.setWidget(WIDGET_KEY, undefined);
+			if (widgetRegistered) {
+				widgetRegistered = false;
+				widgetTui = null;
+				ctx.ui.setWidget(WIDGET_KEY, undefined);
+			}
 			return;
 		}
 
-		ctx.ui.setWidget(WIDGET_KEY, (_tui, theme) => ({
-			render(width: number): string[] {
-				const out: string[] = [];
-				const header =
-					theme.fg("accent", "ⓘ ") +
-					theme.fg("text", `waiting on ${running.length} job${running.length > 1 ? "s" : ""}`);
-				out.push(header.slice(0, width));
+		if (!widgetRegistered) {
+			widgetRegistered = true;
+			ctx.ui.setWidget(WIDGET_KEY, (tui, theme) => {
+				widgetTui = tui;
+				return {
+					render(width: number): string[] {
+						const current = runningJobs();
+						if (current.length === 0) return [];
+						const out: string[] = [];
+						const header =
+							theme.fg("accent", "ⓘ ") +
+							theme.fg("text", `waiting on ${current.length} job${current.length > 1 ? "s" : ""}`);
+						out.push(truncateToWidth(header, width));
 
-				for (const job of running.slice(0, 5)) {
-					const elapsed = formatElapsed(Date.now() - job.startedAt);
-					const preview = job.lastLine ? ` · ${job.lastLine}` : "";
-					const left = `${theme.fg("dim", "└ ⋮ ")}${theme.fg("bashMode", "[bash]")} ${theme.fg("text", job.label)} ${theme.fg("muted", job.id)}${theme.fg("dim", preview)}`;
-					const right = theme.fg("dim", elapsed);
-					const maxPreviewLen = Math.max(20, width - 12);
-					const trimmedLeft = left.length > maxPreviewLen ? `${left.slice(0, maxPreviewLen - 1)}…` : left;
-					out.push(`${trimmedLeft}  ${right}`);
+						for (const job of current.slice(0, 5)) {
+							const elapsed = formatElapsed(Date.now() - job.startedAt);
+							const preview = job.lastLine ? ` · ${job.lastLine}` : "";
+							const left = `${theme.fg("dim", "└ ⋮ ")}${theme.fg("bashMode", "[bash]")} ${theme.fg("text", job.label)} ${theme.fg("muted", job.id)}${theme.fg("dim", preview)}`;
+							const right = theme.fg("dim", elapsed);
+							const rightW = visibleWidth(right);
+							const leftTrimmed = truncateToWidth(left, Math.max(10, width - rightW - 2));
+							const gap = Math.max(1, width - visibleWidth(leftTrimmed) - rightW);
+							out.push(truncateToWidth(`${leftTrimmed}${" ".repeat(gap)}${right}`, width));
 
-					const activePos = tickPhase % DOTS;
-					let dots = "";
-					for (let i = 0; i < DOTS; i++) {
-						dots += i <= activePos ? theme.fg("success", "● ") : theme.fg("accent", "● ");
-					}
-					out.push(`  ${theme.fg("muted", job.id)} ${dots.trimEnd()}`);
-				}
+							const activePos = tickPhase % DOTS;
+							let dots = "";
+							for (let i = 0; i < DOTS; i++) {
+								dots += i <= activePos ? theme.fg("success", "● ") : theme.fg("accent", "● ");
+							}
+							out.push(truncateToWidth(`  ${theme.fg("muted", job.id)} ${dots.trimEnd()}`, width));
+						}
 
-				if (running.length > 5) {
-					out.push(theme.fg("dim", `  +${running.length - 5} more background job(s)`));
-				}
-				return out;
-			},
-			invalidate() {},
-		}));
+						if (current.length > 5) {
+							out.push(truncateToWidth(theme.fg("dim", `  +${current.length - 5} more background job(s)`), width));
+						}
+						return out;
+					},
+					invalidate() {},
+				};
+			});
+		} else {
+			widgetTui?.requestRender?.();
+		}
 
 		if (!uiTimer) {
 			uiTimer = setInterval(() => {
 				tickPhase = (tickPhase + 1) % DOTS;
-				refreshWidget();
+				widgetTui?.requestRender?.();
 			}, 1000);
 			uiTimer.unref();
 		}
@@ -256,6 +274,8 @@ export default function bgBashExtension(pi: ExtensionAPI) {
 			}
 		}
 		activeCtx?.ui.setWidget(WIDGET_KEY, undefined);
+		widgetRegistered = false;
+		widgetTui = null;
 		activeCtx = null;
 	});
 
