@@ -403,10 +403,150 @@ export default function (pi: ExtensionAPI) {
       },
     }));
 
+    const IMAGE_EXT_RE = /\.(png|jpe?g|webp|gif|bmp)$/i;
+
+    function readImageDimensions(filePath: string): { width?: number; height?: number; sizeKb: number } | null {
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) return null;
+        const sizeKb = Math.max(1, Math.round(stat.size / 1024));
+        const fd = fs.openSync(filePath, "r");
+        const buf = Buffer.alloc(Math.min(stat.size, 65536));
+        const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+        fs.closeSync(fd);
+        const b = buf.subarray(0, bytesRead);
+
+        // PNG
+        if (b.length >= 24 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+          return { width: b.readUInt32BE(16), height: b.readUInt32BE(20), sizeKb };
+        }
+        // GIF
+        if (b.length >= 10 && b.subarray(0, 3).toString("ascii") === "GIF") {
+          return { width: b.readUInt16LE(6), height: b.readUInt16LE(8), sizeKb };
+        }
+        // WEBP
+        if (
+          b.length >= 30 &&
+          b.subarray(0, 4).toString("ascii") === "RIFF" &&
+          b.subarray(8, 12).toString("ascii") === "WEBP"
+        ) {
+          const chunk = b.subarray(12, 16).toString("ascii");
+          if (chunk === "VP8X" && b.length >= 30) {
+            const w = 1 + (b[24] | (b[25] << 8) | (b[26] << 16));
+            const h = 1 + (b[27] | (b[28] << 8) | (b[29] << 16));
+            return { width: w, height: h, sizeKb };
+          }
+          if (chunk === "VP8 " && b.length >= 30) {
+            return { width: b.readUInt16LE(26) & 0x3fff, height: b.readUInt16LE(28) & 0x3fff, sizeKb };
+          }
+          if (chunk === "VP8L" && b.length >= 25) {
+            const bits = b.readUInt32LE(21);
+            return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1, sizeKb };
+          }
+        }
+        // JPEG
+        if (b.length >= 4 && b[0] === 0xff && b[1] === 0xd8) {
+          let i = 2;
+          while (i + 9 < b.length) {
+            if (b[i] !== 0xff) {
+              i++;
+              continue;
+            }
+            const marker = b[i + 1];
+            if (marker >= 0xc0 && marker <= 0xc3) {
+              return { width: b.readUInt16BE(i + 7), height: b.readUInt16BE(i + 5), sizeKb };
+            }
+            if (i + 3 >= b.length) break;
+            const segLen = b.readUInt16BE(i + 2);
+            if (segLen < 2) break;
+            i += 2 + segLen;
+          }
+        }
+        return { sizeKb };
+      } catch {
+        return null;
+      }
+    }
+
+    function extractImageFilePath(raw: string): string | null {
+      const trimmed = raw.trim();
+      if (!trimmed || trimmed.includes("\n") || trimmed.includes("\r")) return null;
+      let cleaned = trimmed;
+      if (
+        (cleaned.startsWith("'") && cleaned.endsWith("'")) ||
+        (cleaned.startsWith("\"") && cleaned.endsWith("\""))
+      ) {
+        cleaned = cleaned.slice(1, -1);
+      }
+      if (cleaned.startsWith("file://")) {
+        try {
+          cleaned = decodeURIComponent(new URL(cleaned).pathname);
+        } catch {
+          return null;
+        }
+      }
+      if (!IMAGE_EXT_RE.test(cleaned)) return null;
+      try {
+        return fs.statSync(cleaned).isFile() ? cleaned : null;
+      } catch {
+        return null;
+      }
+    }
+
     class DetailedHudEditor extends CustomEditor {
+      private imagePastes = new Map<number, { path: string; label: string }>();
+      private imageCounter = 0;
+
       constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
         super(tui, theme, keybindings, { paddingX: 1 });
         activeTui = tui;
+      }
+
+      setText(text: string): void {
+        this.imagePastes.clear();
+        this.imageCounter = 0;
+        super.setText(text);
+      }
+
+      expandPasteMarkers(text: string): string {
+        const baseProto = Object.getPrototypeOf(DetailedHudEditor.prototype);
+        let result: string =
+          typeof baseProto?.expandPasteMarkers === "function"
+            ? baseProto.expandPasteMarkers.call(this, text)
+            : text;
+        for (const [id, info] of this.imagePastes) {
+          const re = new RegExp(`\\[img #${id}\\]`, "g");
+          result = result.replace(re, () => info.path);
+        }
+        return result;
+      }
+
+      private tryInsertImageTag(rawText: string): boolean {
+        const imgPath = extractImageFilePath(rawText);
+        if (!imgPath) return false;
+        const meta = readImageDimensions(imgPath);
+        const extLabel = path.extname(imgPath).replace(/^\./, "").toUpperCase() || "IMG";
+        const sizeLabel = meta ? `${meta.sizeKb}KB` : "";
+        const dimLabel = meta?.width && meta?.height ? `${meta.width}×${meta.height}` : "";
+        const label = [dimLabel, sizeLabel, extLabel].filter(Boolean).join(" · ");
+        this.imageCounter += 1;
+        const id = this.imageCounter;
+        this.imagePastes.set(id, { path: imgPath, label });
+
+        const self = this as any;
+        self.cancelAutocomplete?.();
+        self.exitHistoryBrowsing?.();
+        self.lastAction = null;
+        self.pushUndoSnapshot?.();
+
+        const cursor = this.getCursor();
+        const currentLine = this.getLines()[cursor.line] ?? "";
+        const before = cursor.col > 0 ? currentLine[cursor.col - 1] ?? "" : "";
+        const after = currentLine[cursor.col] ?? "";
+        const lead = before && !/\s/.test(before) ? " " : "";
+        const trail = after && !/\s/.test(after) ? " " : "";
+        self.insertTextAtCursorInternal(`${lead}[img #${id}]${trail}`);
+        return true;
       }
 
       private shouldCollapsePaste(text: string): boolean {
@@ -419,6 +559,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       insertTextAtCursor(text: string): void {
+        if (text && this.tryInsertImageTag(text)) {
+          return;
+        }
         if (text && this.shouldCollapsePaste(text)) {
           this.handlePaste(text);
           return;
@@ -441,6 +584,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       handlePaste(pastedText: string): void {
+        if (this.tryInsertImageTag(pastedText)) {
+          return;
+        }
         const normalized = pastedText
           .replace(/\r\n/g, "\n")
           .replace(/\r/g, "\n")
@@ -531,7 +677,84 @@ export default function (pi: ExtensionAPI) {
         const borderColor = (text: string) => this.borderColor(text);
         lines[0] = fitBorder(topLeft, topRight, width, borderColor);
         lines[lines.length - 1] = fitBorder(bottomLeft, bottomRight, width, borderColor);
+
+        const previewRows = this.renderAttachmentBar(width, thm);
+        if (previewRows.length > 0) {
+          return [...previewRows, ...lines];
+        }
         return lines;
+      }
+
+      private renderAttachmentBar(width: number, thm: ExtensionContext["ui"]["theme"]): string[] {
+        if (width < 20) return [];
+        const currentText = this.getText();
+        const pastesMap: Map<number, string> | undefined = (this as any).pastes;
+
+        const pills: string[] = [];
+        const seenImg = new Set<number>();
+        const seenPaste = new Set<number>();
+
+        for (const match of currentText.matchAll(/\[(img|paste) #(\d+)(?: [^\]]+)?\]/g)) {
+          const kind = match[1];
+          const id = Number(match[2]);
+          if (kind === "img" && !seenImg.has(id) && this.imagePastes.has(id)) {
+            seenImg.add(id);
+            const info = this.imagePastes.get(id)!;
+            pills.push(
+              thm.fg("accent", "[") +
+                thm.fg("warning", ` img #${id}`) +
+                thm.fg("dim", " · ") +
+                thm.fg("text", info.label) +
+                " " +
+                thm.fg("accent", "]"),
+            );
+          } else if (kind === "paste" && !seenPaste.has(id) && pastesMap?.has(id)) {
+            seenPaste.add(id);
+            const raw = pastesMap.get(id) ?? "";
+            const lineCount = raw.split("\n").length;
+            const sizeKb =
+              raw.length >= 1024 ? `${(raw.length / 1024).toFixed(1)}KB` : `${raw.length}c`;
+            const firstLine = raw
+              .split("\n")
+              .map((l) => l.trim())
+              .find((l) => l.length > 0) ?? "";
+            const snippet = firstLine.length > 20 ? `${firstLine.slice(0, 20)}…` : firstLine;
+            const previewPart = snippet ? `${thm.fg("dim", " · ")}${thm.fg("muted", `"${snippet}"`)}` : "";
+            pills.push(
+              thm.fg("accent", "[") +
+                thm.fg("success", ` paste #${id}`) +
+                thm.fg("dim", " · ") +
+                thm.fg("text", `${lineCount}L · ${sizeKb}`) +
+                previewPart +
+                " " +
+                thm.fg("accent", "]"),
+            );
+          }
+        }
+
+        if (pills.length === 0) return [];
+
+        const rows: string[] = [];
+        const prefix = " ";
+        let current = prefix;
+        let currentW = 1;
+
+        for (const pill of pills) {
+          const pillW = visibleWidth(pill);
+          const sep = currentW > 1 ? " " : "";
+          if (currentW > 1 && currentW + sep.length + pillW > width) {
+            rows.push(truncateToWidth(current, width));
+            current = `${prefix}${pill}`;
+            currentW = 1 + pillW;
+          } else {
+            current += `${sep}${pill}`;
+            currentW += sep.length + pillW;
+          }
+        }
+        if (currentW > 1) {
+          rows.push(truncateToWidth(current, width));
+        }
+        return rows;
       }
     }
 
