@@ -222,6 +222,20 @@ export default function (pi: ExtensionAPI) {
   let compactingNow = false;
   let turnStartTime = 0;
   let lastTurnTokPerSec = 0;
+  let liveActiveRole: string | undefined;
+  let liveReadOnly: boolean | undefined;
+
+  pi.events.on("role:readonly-changed", (data: unknown) => {
+    const payload = data as { role?: string; readOnly?: boolean } | undefined;
+    if (payload?.role) liveActiveRole = payload.role;
+    if (typeof payload?.readOnly === "boolean") liveReadOnly = payload.readOnly;
+    activeTui?.requestRender();
+  });
+
+  function hasObservationalMemoryCompactor(settings: Record<string, any>): boolean {
+    const pkgs = Array.isArray(settings.packages) ? settings.packages : [];
+    return pkgs.some((p: unknown) => typeof p === "string" && p.includes("pi-observational-memory"));
+  }
 
   let idleCompactTimer: ReturnType<typeof setTimeout> | undefined;
   const IDLE_COMPACT_DELAY_MS = 180_000;
@@ -237,7 +251,7 @@ export default function (pi: ExtensionAPI) {
   function scheduleIdleCompact(ctx: ExtensionContext) {
     clearIdleCompactTimer();
     const settings = readJson(SETTINGS_PATH);
-    if (settings.compaction?.enabled === false) return;
+    if (settings.compaction?.enabled === false || hasObservationalMemoryCompactor(settings)) return;
     idleCompactTimer = setTimeout(() => {
       idleCompactTimer = undefined;
       if (compactingNow) return;
@@ -318,10 +332,10 @@ export default function (pi: ExtensionAPI) {
       turnStartTime = 0;
     }
 
-    // 2. Check adaptive compaction threshold
+    // 2. Check adaptive compaction threshold (only if pi-observational-memory is not already governing compaction)
     if (compactingNow) return;
     const settings = readJson(SETTINGS_PATH);
-    if (settings.compaction?.enabled === false) return;
+    if (settings.compaction?.enabled === false || hasObservationalMemoryCompactor(settings)) return;
 
     const configuredThreshold = Number(settings.compactThresholdTokens ?? 120_000);
     if (!configuredThreshold || configuredThreshold <= 0) return;
@@ -391,8 +405,55 @@ export default function (pi: ExtensionAPI) {
 
     class DetailedHudEditor extends CustomEditor {
       constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
-        super(tui, theme, keybindings, { paddingX: 0 });
+        super(tui, theme, keybindings, { paddingX: 1 });
         activeTui = tui;
+      }
+
+      handlePaste(pastedText: string): void {
+        const normalized = pastedText
+          .replace(/\r\n/g, "\n")
+          .replace(/\r/g, "\n")
+          .replace(/\t/g, "    ");
+        const lines = normalized.split("\n");
+        const shouldCollapse = lines.length > 20 || normalized.length > 400;
+        if (!shouldCollapse) {
+          if (lines.length <= 10) {
+            super.handlePaste(pastedText);
+            return;
+          }
+          const self = this as any;
+          self.cancelAutocomplete?.();
+          self.exitHistoryBrowsing?.();
+          self.lastAction = null;
+          self.pushUndoSnapshot?.();
+          const clean = normalized
+            .split("")
+            .filter((ch: string) => ch === "\n" || ch.charCodeAt(0) >= 32)
+            .join("");
+          self.insertTextAtCursorInternal(clean);
+          return;
+        }
+
+        const self = this as any;
+        self.cancelAutocomplete?.();
+        self.exitHistoryBrowsing?.();
+        self.lastAction = null;
+        self.pushUndoSnapshot?.();
+
+        const clean = normalized
+          .split("")
+          .filter((ch: string) => ch === "\n" || ch.charCodeAt(0) >= 32)
+          .join("");
+        const cleanLines = clean.split("\n");
+        self.pasteCounter = (self.pasteCounter ?? 0) + 1;
+        const pasteId: number = self.pasteCounter;
+        self.pastes?.set(pasteId, clean);
+
+        const marker =
+          cleanLines.length > 20
+            ? `[paste #${pasteId} +${cleanLines.length} lines]`
+            : `[paste #${pasteId} ${clean.length} chars]`;
+        self.insertTextAtCursorInternal(marker);
       }
 
       render(width: number): string[] {
@@ -401,11 +462,12 @@ export default function (pi: ExtensionAPI) {
 
         const thm = ctx.ui.theme;
         const roles = readJson(ROLES_PATH);
-        const activeRole = String(roles.defaultRole ?? "coding");
-        const isReadOnly = Boolean(roles.modelRoles?.[activeRole]?.readOnly);
+        const activeRole = liveActiveRole ?? String(roles.defaultRole ?? "default");
+        const isReadOnly = liveReadOnly ?? Boolean(roles.modelRoles?.[activeRole]?.readOnly);
         const advisorOn = roles.advisorEnabled !== false;
 
-        const modelName = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "auto";
+        const fullModelKey = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "auto";
+        const shortModel = ctx.model ? ctx.model.id : "auto";
         const effort = pi.getThinkingLevel() || "medium";
         const effortColor =
           effort === "high" || effort === "xhigh"
@@ -414,23 +476,22 @@ export default function (pi: ExtensionAPI) {
               ? "accent"
               : "success";
 
-        const roleLabel = isReadOnly ? `role:${activeRole} [RO]` : `role:${activeRole}`;
-        const rolePart = thm.fg("accent", roleLabel);
-        const modelPart = thm.fg("text", `model:${modelName}`);
-        const effortPart = thm.fg(effortColor, `effort:${effort}`);
-        const advPart = advisorOn ? thm.fg("success", "advisor:on") : thm.fg("dim", "advisor:off");
+        const roleLabel = isReadOnly ? `[${activeRole} · RO]` : `[${activeRole}]`;
+        const rolePart = thm.fg(isReadOnly ? "warning" : "accent", roleLabel);
+        const modelPart = thm.fg("text", shortModel);
+        const effortPart = thm.fg(effortColor, effort);
+        const advPart = advisorOn ? thm.fg("success", "adv:on") : thm.fg("dim", "adv:off");
 
-        const topLeft = ` ${rolePart} · ${modelPart} · ${effortPart} `;
+        const topLeft = ` ${rolePart} ${modelPart} ${thm.fg("dim", "·")} ${effortPart} `;
         const topRight = ` ${advPart} `;
 
         const ctxInfo = formatContextAndCost(ctx);
         const ctxColor = ctxInfo.percent >= 80 ? "error" : ctxInfo.percent >= 60 ? "warning" : "muted";
         const stats = readJson(STATS_PATH) as Record<string, ModelPerfEntry>;
-        const savedTps = stats[modelName]?.avgTokPerSec;
+        const savedTps = stats[fullModelKey]?.avgTokPerSec;
         const tpsToShow = lastTurnTokPerSec || savedTps || 0;
         const tpsPart = tpsToShow > 0 ? ` · ${tpsToShow} tok/s` : "";
-        const pricePart = ctx.model ? ` · ${formatPriceTag(ctx.model)}` : "";
-        const bottomLeft = thm.fg(ctxColor, ` ${ctxInfo.text}${tpsPart}${pricePart} `);
+        const bottomLeft = thm.fg(ctxColor, ` ${ctxInfo.text}${tpsPart} `);
         const bottomRight = thm.fg(
           "muted",
           ` ${formatCwd(ctx.cwd)}${gitBranch ? ` (${gitBranch})` : ""} `,
@@ -1101,6 +1162,12 @@ export default function (pi: ExtensionAPI) {
     const settings = readJson(SETTINGS_PATH);
     if (settings.detailedHud !== false) {
       applyHudEditor(ctx, true);
+      // Re-apply after package session_start hooks (e.g. @vigolium/piolium) so DetailedHudEditor stays active
+      setImmediate(() => {
+        if (readJson(SETTINGS_PATH).detailedHud !== false) {
+          applyHudEditor(ctx, true);
+        }
+      });
     }
 
     void pi

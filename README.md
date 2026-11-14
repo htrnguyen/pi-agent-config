@@ -4,15 +4,16 @@ Cấu hình cá nhân hóa cho **Pi Coding Agent**, tối ưu cho tốc độ, t
 
 ## 1. Kiến trúc & Điểm nổi bật
 
-- **Auto-Compact thông minh (100k–150k, mặc định 120k)**: Tự động nén ngữ cảnh khi đạt ngưỡng (hoặc 75% `contextWindow` với model nhỏ) trước khi tràn bộ nhớ.
-- **Router & Role-based Models (`roles.json` + `01-router-roles.ts`)**:
-  - `default`: `openai-codex/gpt-6-luna:low` (fallback `antigravity/gemini-3.8-flash:low`)
-  - `coding`: `openai-codex/gpt-6.1-terra:medium` (fallback `antigravity/claude-sonnet-5-5:medium`)
-  - `plan`: `openai-codex/gpt-6.1-sol:medium` (Read-only, fallback `antigravity/claude-opus-5-5:medium`)
-  - `slow`: `openai-codex/gpt-6.1-sol:high` (fallback `genz-codex/gpt-6.1-terra:high`)
-  - `smol` / `task` / `commit`: `openai-codex/gpt-6-luna:low` (fallback `zai/glm-5.3-flash:low`)
-  - `advisor`: `genz-codex/codex-auto-review:medium` (Read-only)
-  - Mỗi role chỉ dùng **1 fallback duy nhất** để tránh dây chuyền retry gây trễ.
+- **Auto-Compact & Memory thống nhất (120k tokens)**: Điều khiển bởi `pi-observational-memory` (ghim cố định `zai/glm-5.3-flash:low` cho Observer/Reflector nền, không dùng ngầm Paid API).
+- **Hybrid Advisory Router & 5 Task Roles (`roles.json` + `01-router-roles.ts`)**:
+  - `default`: `openai-codex/gpt-6-luna:low` (fallback `zai/glm-5.3-flash:low`) — Hỏi đáp, đọc hiểu codebase & tác vụ hằng ngày.
+  - `coding`: `openai-codex/gpt-6-luna:medium` (fallback `antigravity/gemini-3.8-flash:medium`) — Implement, sửa bug & refactor chính.
+  - `plan`: `genz-codex/gpt-6.1-sol:high` (Read-only, fallback `openai-codex/gpt-6-luna:high`) — Thiết kế kiến trúc & lập kế hoạch.
+  - `slow`: `genz-codex/gpt-6.1-terra:high` (fallback `openai-codex/gpt-6-luna:high`) — Debug sâu, race condition & bài toán kiến trúc khó.
+  - `advisor`: `antigravity/gemini-3.8-flash:medium` (Read-only, fallback `zai/glm-5.3-flash:medium`) — Review code độc lập, tìm edge cases & regression.
+  - Advisory Router dùng `zai/glm-5.3-flash:low` ở chế độ **suggest-only (Yes/No)**, có Rule Gate bỏ qua nhanh các câu tiếp nối và không bao giờ tự động chuyển sang Paid API.
+- **4 Subagents chuyên biệt (`settings.json` + `pi-subagents`)**:
+  - `scout` (`zai/glm-5.3-flash:low`, Read-only), `researcher` (`antigravity/gemini-3.8-flash:low`), `worker` (`openai-codex/gpt-6-luna:medium`), `reviewer` (`antigravity/gemini-3.8-flash:medium`, Read-only + `git diff`), giới hạn tối đa 3 tiến trình song song.
 - **Thống kê Token, Chi phí & Tốc độ (`lib/stats/` + `00-control-panel.ts`)**:
   - Tự động đo và lưu `tok/s` thực tế của từng model.
   - Báo cáo chi phí & token theo ngày/model bằng tiếng Anh qua `/stats` hoặc `/cost`.

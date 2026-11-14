@@ -12,10 +12,12 @@ node_modules/
 npm/
 sessions/
 project-memory/
+backups/
 pi-subagents/
 pi-web-access/
 mcp.log*
 mcp-cache.json
+mcp-npx-cache.json
 mcp-last-seen-version.json
 mcp-onboarding.json
 models-store.json

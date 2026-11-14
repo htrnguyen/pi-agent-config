@@ -22,7 +22,14 @@
     "agentOverrides": {
       "scout": {
         "model": "zai/glm-5.3-flash",
-        "thinking": "low"
+        "thinking": "low",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ],
+        "output": false
       },
       "researcher": {
         "model": "antigravity/gemini-3.8-flash",
@@ -34,9 +41,56 @@
       },
       "reviewer": {
         "model": "antigravity/gemini-3.8-flash",
-        "thinking": "medium"
+        "thinking": "medium",
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls",
+          "bash"
+        ],
+        "output": false
+      },
+      "oracle": {
+        "disabled": true
+      },
+      "evidence-auditor": {
+        "disabled": true
+      },
+      "delegate": {
+        "disabled": true
+      },
+      "claude-code": {
+        "disabled": true
+      },
+      "claude-code-writer": {
+        "disabled": true
+      },
+      "codex-exec": {
+        "disabled": true
+      },
+      "codex-exec-writer": {
+        "disabled": true
+      },
+      "cursor-agent": {
+        "disabled": true
+      },
+      "cursor-agent-writer": {
+        "disabled": true
       }
     }
+  },
+  "observational-memory": {
+    "model": {
+      "provider": "zai",
+      "id": "glm-5.3-flash",
+      "thinking": "low"
+    },
+    "observeAfterTokens": 12000,
+    "reflectAfterTokens": 24000,
+    "compactAfterTokens": 120000,
+    "compactAfterTokensMode": "calibrated",
+    "showWorkerNotifications": false
   },
   "packages": [
     "npm:pi-mcp-adapter",
@@ -50,15 +104,13 @@
     "npm:@plannotator/pi-extension",
     "npm:pi-goal-x",
     "npm:pi-observational-memory",
-    "npm:pi-project-memory",
-    "npm:pi-antigravity",
-    "npm:pi-usage"
+    "npm:pi-antigravity"
   ],
   "extensionChangelogVersions": {
     "{\"source\":\"npm:pi-mcp-adapter\",\"scope\":\"user\"}": "7.0.1",
     "{\"source\":\"npm:pi-web-access\",\"scope\":\"user\"}": "0.47.0",
     "{\"source\":\"npm:pi-subagents\",\"scope\":\"user\"}": "0.88.1",
-    "{\"source\":\"npm:pi-lens\",\"scope\":\"user\"}": "4.4.12"
+    "{\"source\":\"npm:pi-lens\",\"scope\":\"user\"}": "4.5.0"
   },
   "enableSkillCommands": false,
   "autocompleteMaxVisible": 12,
@@ -69,6 +121,7 @@
     "showTerminalProgress": true
   },
   "detailedHud": true,
+  "theme": "tokyo-clean",
   "compaction": {
     "enabled": true,
     "reserveTokens": 24000,

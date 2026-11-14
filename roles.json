@@ -15,7 +15,7 @@
       "default": 0.85
     },
     "maxSuggestionsPerTask": 1,
-    "timeoutMs": 2200,
+    "timeoutMs": 1500,
     "onFailure": "keep-current-role",
     "requireConfirmation": true,
     "paidRoles": [
@@ -28,8 +28,7 @@
     "default",
     "coding",
     "plan",
-    "slow",
-    "advisor"
+    "slow"
   ],
   "modelRoles": {
     "default": {
@@ -62,9 +61,9 @@
       "description": "Debug sâu, race condition, bài toán kiến trúc khó (Terra)"
     },
     "advisor": {
-      "model": "antigravity/gemini-3.8-flash:high",
+      "model": "antigravity/gemini-3.8-flash:medium",
       "fallbacks": [
-        "zai/glm-5.3-flash:high"
+        "zai/glm-5.3-flash:medium"
       ],
       "readOnly": true,
       "description": "Review code độc lập, tìm edge cases & regression (Read-only)"

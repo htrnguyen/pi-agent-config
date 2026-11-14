@@ -10,7 +10,17 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+function sanitizeOscField(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f;\\]/g, " ").trim();
+}
+
+function escapePowerShellSingleQuoted(value: string): string {
+	return value.replace(/[\x00-\x1f\x7f]/g, " ").replace(/'/g, "''");
+}
+
 function windowsToastScript(title: string, body: string): string {
+	const safeTitle = escapePowerShellSingleQuoted(title);
+	const safeBody = escapePowerShellSingleQuoted(body);
 	const type = "Windows.UI.Notifications";
 	const mgr = `[${type}.ToastNotificationManager, ${type}, ContentType = WindowsRuntime]`;
 	const template = `[${type}.ToastTemplateType]::ToastText01`;
@@ -18,19 +28,19 @@ function windowsToastScript(title: string, body: string): string {
 	return [
 		`${mgr} > $null`,
 		`$xml = [${type}.ToastNotificationManager]::GetTemplateContent(${template})`,
-		`$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${body}')) > $null`,
-		`[${type}.ToastNotificationManager]::CreateToastNotifier('${title}').Show(${toast})`,
+		`$xml.GetElementsByTagName('text')[0].AppendChild($xml.CreateTextNode('${safeBody}')) > $null`,
+		`[${type}.ToastNotificationManager]::CreateToastNotifier('${safeTitle}').Show(${toast})`,
 	].join("; ");
 }
 
 function notifyOSC777(title: string, body: string): void {
-	process.stdout.write(`\x1b]777;notify;${title};${body}\x07`);
+	process.stdout.write(`\x1b]777;notify;${sanitizeOscField(title)};${sanitizeOscField(body)}\x07`);
 }
 
 function notifyOSC99(title: string, body: string): void {
 	// Kitty OSC 99: i=notification id, d=0 means not done yet, p=body for second part
-	process.stdout.write(`\x1b]99;i=1:d=0;${title}\x1b\\`);
-	process.stdout.write(`\x1b]99;i=1:p=body;${body}\x1b\\`);
+	process.stdout.write(`\x1b]99;i=1:d=0;${sanitizeOscField(title)}\x1b\\`);
+	process.stdout.write(`\x1b]99;i=1:p=body;${sanitizeOscField(body)}\x1b\\`);
 }
 
 function notifyWindows(title: string, body: string): void {

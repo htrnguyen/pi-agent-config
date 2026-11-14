@@ -18,10 +18,18 @@ interface ToolsState {
 	enabledTools: string[];
 }
 
+const READ_ONLY_LOCKED_TOOLS = new Set(["edit", "write", "codemode"]);
+
 export default function toolsExtension(pi: ExtensionAPI) {
 	// Track enabled tools
 	let enabledTools: Set<string> = new Set();
 	let allTools: ToolInfo[] = [];
+	let isReadOnlyRole = false;
+
+	pi.events.on("role:readonly-changed", (data: unknown) => {
+		const payload = data as { readOnly?: boolean } | undefined;
+		isReadOnlyRole = Boolean(payload?.readOnly);
+	});
 
 	// Persist current state
 	function persistState() {
@@ -30,9 +38,12 @@ export default function toolsExtension(pi: ExtensionAPI) {
 		});
 	}
 
-	// Apply current tool selection
+	// Apply current tool selection (respecting active Read-Only role lock)
 	function applyTools() {
-		pi.setActiveTools(Array.from(enabledTools));
+		const effective = isReadOnlyRole
+			? Array.from(enabledTools).filter((t) => !READ_ONLY_LOCKED_TOOLS.has(t))
+			: Array.from(enabledTools);
+		pi.setActiveTools(effective);
 	}
 
 	// Find the last tools-config entry in the current branch
@@ -58,8 +69,14 @@ export default function toolsExtension(pi: ExtensionAPI) {
 			enabledTools = new Set(savedTools.filter((t: string) => allToolNames.includes(t)));
 			applyTools();
 		} else {
-			// No saved state - sync with currently active tools
-			enabledTools = new Set(pi.getActiveTools());
+			// No saved state - sync with currently active tools, preserving write tools if currently in a Read-Only role
+			const active = new Set(pi.getActiveTools());
+			if (isReadOnlyRole) {
+				for (const t of allTools) {
+					if (READ_ONLY_LOCKED_TOOLS.has(t.name)) active.add(t.name);
+				}
+			}
+			enabledTools = active;
 		}
 	}
 

@@ -11,16 +11,26 @@ export default function (pi: ExtensionAPI) {
 	const checkpoints = new Map<string, string>();
 	let currentEntryId: string | undefined;
 
-	// Track the current entry ID when user messages are saved
+	// Track the current leaf entry ID (including user message entry at turn_start for /fork alignment)
 	pi.on("tool_result", async (_event, ctx) => {
 		const leaf = ctx.sessionManager.getLeafEntry();
 		if (leaf) currentEntryId = leaf.id;
 	});
 
-	pi.on("turn_start", async () => {
+	pi.on("turn_start", async (_event, ctx) => {
+		const leaf = ctx.sessionManager.getLeafEntry();
+		if (leaf) currentEntryId = leaf.id;
+
+		// Skip gracefully when cwd is not inside a git work tree
+		const check = await pi.exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd: ctx.cwd }).catch(() => ({
+			code: 1,
+			stdout: "",
+		}));
+		if (check.code !== 0) return;
+
 		// Create a git stash entry before LLM makes changes
-		const { stdout } = await pi.exec("git", ["stash", "create"]);
-		const ref = stdout.trim();
+		const { stdout, code } = await pi.exec("git", ["stash", "create"], { cwd: ctx.cwd });
+		const ref = code === 0 ? stdout.trim() : "";
 		if (ref && currentEntryId) {
 			checkpoints.set(currentEntryId, ref);
 			if (checkpoints.size > 30) {
@@ -44,7 +54,14 @@ export default function (pi: ExtensionAPI) {
 		]);
 
 		if (choice?.startsWith("Yes")) {
-			await pi.exec("git", ["stash", "apply", ref]);
+			const { code, stderr } = await pi.exec("git", ["stash", "apply", "--index", ref], { cwd: ctx.cwd });
+			if (code !== 0) {
+				const fallback = await pi.exec("git", ["stash", "apply", ref], { cwd: ctx.cwd });
+				if (fallback.code !== 0) {
+					ctx.ui.notify(`Checkpoint apply had conflicts: ${fallback.stderr || stderr}`, "warning");
+					return;
+				}
+			}
 			ctx.ui.notify("Code restored to checkpoint", "info");
 		}
 	});
@@ -66,13 +83,14 @@ export default function (pi: ExtensionAPI) {
 			if (!choice) return;
 
 			if (choice.startsWith("Create manual")) {
-				const { stdout } = await pi.exec("git", ["stash", "create"]);
-				const ref = stdout.trim();
+				const { stdout, code } = await pi.exec("git", ["stash", "create"], { cwd: ctx.cwd });
+				const ref = code === 0 ? stdout.trim() : "";
 				if (!ref) {
-					ctx.ui.notify("Working tree is clean — no changes to checkpoint.", "info");
+					ctx.ui.notify("Working tree has no tracked modifications to checkpoint.", "info");
 					return;
 				}
-				const key = currentEntryId ?? `manual-${Date.now()}`;
+				const leaf = ctx.sessionManager.getLeafEntry();
+				const key = leaf?.id ?? currentEntryId ?? `manual-${Date.now()}`;
 				checkpoints.set(key, ref);
 				ctx.ui.notify(`Created checkpoint ${ref.slice(0, 10)}`, "info");
 				return;
@@ -80,7 +98,11 @@ export default function (pi: ExtensionAPI) {
 
 			const match = entries.find(([, ref]) => choice.includes(ref.slice(0, 10)));
 			if (match) {
-				await pi.exec("git", ["stash", "apply", match[1]]);
+				const { code, stderr } = await pi.exec("git", ["stash", "apply", match[1]], { cwd: ctx.cwd });
+				if (code !== 0) {
+					ctx.ui.notify(`Restore had conflicts: ${stderr.trim()}`, "warning");
+					return;
+				}
 				ctx.ui.notify(`Restored working tree from checkpoint ${match[1].slice(0, 10)}`, "info");
 			}
 		},

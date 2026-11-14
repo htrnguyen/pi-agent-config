@@ -115,7 +115,7 @@ const DEFAULT_ADVISORY_ROUTER: AdvisoryRouterConfig = {
 		default: 0.85,
 	},
 	maxSuggestionsPerTask: 1,
-	timeoutMs: 2200,
+	timeoutMs: 1500,
 	onFailure: "keep-current-role",
 	requireConfirmation: true,
 	paidRoles: ["plan", "slow"],
@@ -210,18 +210,21 @@ interface AdvisoryClassification {
 const SHORT_FOLLOWUP_REGEX =
 	/^(ok|oke|okay|yes|yep|yeah|no|nope|tiếp|tiếp tục|làm đi|triển khai|triển khai ngay|đúng rồi|chuẩn|sửa nốt|sửa đi|chạy lại|thử lại|vẫn lỗi|vẫn lỗi kìa|xem lại|làm tiếp|continue|go ahead|do it|proceed|lgtm|done|thanks|cảm ơn)[.!?\s]*$/i;
 
+const WRITE_CAPABLE_TOOLS = ["edit", "write", "codemode"] as const;
+const DECLINE_COOLDOWN_TURNS = 4;
+
 const ADVISORY_SYSTEM_PROMPT = `You are a lightweight advisory role classifier for a software engineering AI agent.
 Given the user's new request and the current active role, classify which role best fits the request and output ONLY valid JSON:
 {"role":"default|coding|plan|slow|advisor","confidence":0.0-1.0,"reason":"<brief 1-sentence Vietnamese explanation>"}
 
 Role definitions:
 - default: Questions, explanations, reading code, general chat, or simple queries (even asking "explain architecture of function X" belongs in default, NOT plan).
-- coding: Implementing features, writing/editing code, fixing normal bugs, refactoring.
-- plan: Explicitly designing large multi-component system architecture, major redesigns, or implementation roadmaps BEFORE coding.
+- coding: Implementing features, writing/editing code, fixing normal bugs, refactoring, UI/CSS styling (even if prompt mentions "design/thiết kế UI" or "pricing plan").
+- plan: Explicitly designing large multi-component system architecture, major redesigns, or implementation roadmaps BEFORE writing code.
 - slow: Deeply complex bugs, race conditions, deadlocks, memory leaks, crash dumps, or high-risk complex refactors.
 - advisor: Auditing, reviewing code/diffs, security checks, or independent quality verification without editing.
 
-If the prompt is ambiguous or a minor continuation, lower confidence (< 0.75). Output ONLY the JSON object.`;
+If the prompt is ambiguous or a continuation of current work, keep the current role or output lower confidence (< 0.75). Output ONLY the JSON object.`;
 
 function appendAdvisoryLog(entry: Record<string, unknown>): void {
 	try {
@@ -291,23 +294,24 @@ export default function (pi: ExtensionAPI) {
 	let cfg = loadRolesConfig();
 	let currentRole: string = cfg.defaultRole ?? "default";
 	let temporarilyRemovedWriteTools: string[] = [];
-	const declinedSuggestions = new Set<string>();
+	const declinedSuggestions = new Map<string, number>();
 	const decisionCache = new Map<string, AdvisoryClassification>();
 	let suggestionsShownForRun = 0;
 
 	function syncReadOnlyTools(readOnly: boolean) {
 		const active = new Set(pi.getActiveTools());
 		if (readOnly) {
-			const toRemove = ["edit", "write"].filter((t) => active.has(t));
+			const toRemove = WRITE_CAPABLE_TOOLS.filter((t) => active.has(t));
 			if (toRemove.length > 0) {
 				temporarilyRemovedWriteTools = [...new Set([...temporarilyRemovedWriteTools, ...toRemove])];
-				pi.setActiveTools([...active].filter((t) => t !== "edit" && t !== "write"));
+				pi.setActiveTools([...active].filter((t) => !(WRITE_CAPABLE_TOOLS as readonly string[]).includes(t)));
 			}
 		} else if (temporarilyRemovedWriteTools.length > 0) {
 			const restored = [...new Set([...active, ...temporarilyRemovedWriteTools])];
 			temporarilyRemovedWriteTools = [];
 			pi.setActiveTools(restored);
 		}
+		pi.events.emit("role:readonly-changed", { readOnly, role: currentRole });
 	}
 
 	function updateFooter(ctx: ExtensionContext, resolvedSelector?: string) {
@@ -355,12 +359,9 @@ export default function (pi: ExtensionAPI) {
 		}
 		pi.setThinkingLevel(resolved.effort);
 
-		// Dynamically lock/unlock edit & write without overwriting user/MCP tool changes
-		syncReadOnlyTools(Boolean(entry.readOnly));
-
 		currentRole = roleName;
-		cfg.defaultRole = roleName;
-		saveGlobalRolesConfig(cfg);
+		// Dynamically lock/unlock edit, write & codemode without overwriting defaultRole on disk
+		syncReadOnlyTools(Boolean(entry.readOnly));
 		updateFooter(ctx, `${resolved.model.provider}/${resolved.model.id}:${resolved.effort}`);
 
 		if (notify && ctx.hasUI) {
@@ -401,12 +402,12 @@ export default function (pi: ExtensionAPI) {
 		const trimmed = event.text.trim();
 		if (!trimmed) return { action: "continue" };
 
-		// Tier 1: Fast Rule Gate (zero LLM calls)
-		if (trimmed.length <= 45 && SHORT_FOLLOWUP_REGEX.test(trimmed)) {
+		// Tier 1: Minimal Gate (only skip pure short acknowledgements; let LLM Router classify all real tasks)
+		if (trimmed.length <= 35 && SHORT_FOLLOWUP_REGEX.test(trimmed)) {
 			return { action: "continue" };
 		}
 		const isCurrentlyPaid = adv.paidRoles.includes(currentRole);
-		if (!isCurrentlyPaid && trimmed.length < 25) {
+		if (!isCurrentlyPaid && trimmed.length < 20) {
 			return { action: "continue" };
 		}
 		if (suggestionsShownForRun >= adv.maxSuggestionsPerTask) {
@@ -431,7 +432,7 @@ export default function (pi: ExtensionAPI) {
 				});
 				return { action: "continue" };
 			}
-			if (decisionCache.size >= 25) {
+			if (decisionCache.size >= 40) {
 				const oldest = decisionCache.keys().next().value;
 				if (oldest) decisionCache.delete(oldest);
 			}
@@ -456,7 +457,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const pairKey = `${currentRole}->${result.role}`;
-		if (declinedSuggestions.has(pairKey)) return { action: "continue" };
+		if ((declinedSuggestions.get(pairKey) ?? 0) > 0) return { action: "continue" };
 
 		// Always ask Yes/No — never auto-switch
 		const currentEntry = cfg.modelRoles[currentRole];
@@ -500,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 		if (accepted) {
 			await applyRole(result.role, ctx, true);
 		} else {
-			declinedSuggestions.add(pairKey);
+			declinedSuggestions.set(pairKey, DECLINE_COOLDOWN_TURNS);
 		}
 
 		return { action: "continue" };
@@ -508,6 +509,32 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async () => {
 		suggestionsShownForRun = 0;
+		for (const [key, remaining] of declinedSuggestions.entries()) {
+			if (remaining <= 1) {
+				declinedSuggestions.delete(key);
+			} else {
+				declinedSuggestions.set(key, remaining - 1);
+			}
+		}
+	});
+
+	pi.on("before_agent_start", async (event) => {
+		const isRO = Boolean(cfg.modelRoles[currentRole]?.readOnly);
+		syncReadOnlyTools(isRO);
+		if (isRO) {
+			const roConstraint =
+				"\n\n[ROLE CONSTRAINT: READ-ONLY MODE]\n" +
+				`You are currently operating in the read-only [${currentRole}] role. ` +
+				"Do NOT modify files, run mutating shell commands, or delegate file-writing tasks. Focus strictly on analysis, architecture planning, or review.";
+			if (!event.systemPrompt.includes("[ROLE CONSTRAINT: READ-ONLY MODE]")) {
+				return { systemPrompt: event.systemPrompt + roConstraint };
+			}
+		}
+		return undefined;
+	});
+
+	pi.on("session_tree", async () => {
+		syncReadOnlyTools(Boolean(cfg.modelRoles[currentRole]?.readOnly));
 	});
 
 	pi.on("session_start", async () => {
@@ -533,9 +560,9 @@ export default function (pi: ExtensionAPI) {
 					tried.add(`${request.failed.model.provider}/${request.failed.model.id}`);
 				}
 
-				const resolved = resolvePhysicalFromRole(roleName, cfg, ctx, tried) ?? resolvePhysicalFromRole(roleName, cfg, ctx);
+				const resolved = resolvePhysicalFromRole(roleName, cfg, ctx, tried);
 				if (!resolved) {
-					throw new Error(`No available model for role/${roleName}`);
+					throw new Error(`No available fallback model remaining for role/${roleName} (tried: ${[...tried].join(", ")})`);
 				}
 				return {
 					model: resolved.model,
@@ -736,13 +763,17 @@ export default function (pi: ExtensionAPI) {
 		updateFooter(ctx);
 	});
 
-	// Apply defaultRole on startup so the user starts on their exact configured coding model+effort
+	// Apply defaultRole on startup so the user starts on their exact configured free/sub model+effort
 	pi.on("session_start", async (event, ctx) => {
 		cfg = loadRolesConfig(ctx.cwd);
-		currentRole = cfg.defaultRole ?? "coding";
+		const adv = getAdvisoryConfig(cfg);
+		const configuredDefault = cfg.defaultRole ?? "default";
+		// Never boot a fresh session into a Paid API role (plan/slow)
+		currentRole = adv.paidRoles.includes(configuredDefault) ? "default" : configuredDefault;
 		if (event.reason === "startup") {
 			await applyRole(currentRole, ctx, false);
 		} else {
+			syncReadOnlyTools(Boolean(cfg.modelRoles[currentRole]?.readOnly));
 			updateFooter(ctx);
 		}
 	});

@@ -1,0 +1,7 @@
+{
+  "parallel": {
+    "maxTasks": 6,
+    "concurrency": 3
+  },
+  "maxActiveAsyncRunsPerSession": 3
+}
