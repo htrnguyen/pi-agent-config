@@ -15,7 +15,7 @@
       "default": 0.85
     },
     "maxSuggestionsPerTask": 1,
-    "timeoutMs": 1500,
+    "timeoutMs": 700,
     "onFailure": "keep-current-role",
     "requireConfirmation": true,
     "paidRoles": [

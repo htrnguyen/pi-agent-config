@@ -142,8 +142,9 @@ function parseProviderModel(spec: string): { provider: string; id: string } | un
 const ADVISOR_REVIEW_SYSTEM_PROMPT = `You are an independent read-only Senior Code Advisor reviewing uncommitted git changes made by another coding agent.
 Inspect the git diff carefully for genuine logic bugs, security vulnerabilities, race conditions, broken contracts, or missing edge-case guards.
 Do NOT nitpick style, formatting, or invent speculative issues.
-If the diff is sound, reply with EXACTLY:
+If the diff is sound, reply starting with:
 APPROVE
+followed by 1-2 concise bullet points summarizing what you verified.
 If there are genuine issues that must be fixed, reply starting with:
 REQUEST_CHANGES
 followed by concise bullet points citing File + Line/Symbol + Issue + Fix.`;
@@ -152,7 +153,7 @@ async function runIndependentAdvisorReview(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	files: string[],
-): Promise<{ modelKey: string; verdict: "APPROVE" | "REQUEST_CHANGES"; feedback: string } | undefined> {
+): Promise<{ modelKey: string; verdict: "APPROVE" | "REQUEST_CHANGES" | "ERROR"; feedback: string }> {
 	const candidates = readAdvisorRoleModels();
 	let targetModel: ReturnType<ExtensionContext["modelRegistry"]["find"]> | undefined;
 	let modelKey = "";
@@ -167,7 +168,13 @@ async function runIndependentAdvisorReview(
 			break;
 		}
 	}
-	if (!targetModel) return undefined;
+	if (!targetModel) {
+		return {
+			modelKey: candidates.join(" / ") || "none",
+			verdict: "ERROR",
+			feedback: `Không tìm thấy model Advisor khả dụng trong registry (candidates: ${candidates.join(", ") || "trống"}).`,
+		};
+	}
 
 	const diffRes = await pi.exec("git", ["diff", "HEAD", "--", ...files.slice(0, 12)], { cwd: ctx.cwd }).catch(() => ({
 		stdout: "",
@@ -194,7 +201,13 @@ async function runIndependentAdvisorReview(
 		}
 		reviewPayload = snippets.join("\n\n").trim();
 	}
-	if (!reviewPayload) return undefined;
+	if (!reviewPayload) {
+		return {
+			modelKey,
+			verdict: "ERROR",
+			feedback: `Không có git diff hoặc nội dung đọc được cho: ${files.join(", ")}.`,
+		};
+	}
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), 18_000);
@@ -219,15 +232,26 @@ async function runIndependentAdvisorReview(
 			.map((c) => c.text)
 			.join("\n")
 			.trim();
-		if (!text) return undefined;
+		if (!text) {
+			return {
+				modelKey,
+				verdict: "ERROR",
+				feedback: "Model Advisor trả về nội dung rỗng.",
+			};
+		}
 		const isApprove = /^APPROVE\b/i.test(text);
 		return {
 			modelKey,
 			verdict: isApprove ? "APPROVE" : "REQUEST_CHANGES",
 			feedback: text,
 		};
-	} catch {
-		return undefined;
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return {
+			modelKey,
+			verdict: "ERROR",
+			feedback: `Lỗi gọi model Advisor: ${msg}`,
+		};
 	} finally {
 		clearTimeout(timer);
 	}
@@ -419,46 +443,60 @@ export default function (pi: ExtensionAPI) {
 						type: "custom_message",
 						customType: "advisor-check",
 						content: msg,
-						display: false,
+						display: true,
 					},
 				],
 				continue: true,
 			};
 		}
 
-		// Stage B: Independent Advisor Model Review (`roles.json -> modelRoles.advisor`) for multi-file (>= 3) or sensitive-path changes after verification passes
-		const touchesSensitive = filesArray.some((f) => SENSITIVE_CODE_PATH_REGEX.test(f));
+		// Stage B: Independent Advisor Model Review (`roles.json -> modelRoles.advisor`) for code changes after verification passes
 		if (
 			verificationPassed &&
 			!advisorReviewTriggeredThisRun &&
-			(modifiedCodeFiles.size >= 3 || touchesSensitive)
+			modifiedCodeFiles.size >= 1
 		) {
 			advisorReviewTriggeredThisRun = true;
 			if (ctx.hasUI) {
-				ctx.ui.notify(`Advisor đang review độc lập (${filesArray.length} file)...`, "info");
+				ctx.ui.setStatus("advisor", ctx.ui.theme.fg("warning", "advisor:reviewing..."));
+				ctx.ui.notify(`Advisor đang review độc lập (${filesArray.length} file: ${fileList})...`, "info");
 			}
 			const review = await runIndependentAdvisorReview(pi, ctx, filesArray);
-			if (review?.verdict === "APPROVE") {
-				if (ctx.hasUI) {
-					ctx.ui.notify(`Advisor (${review.modelKey}): APPROVE`, "info");
-				}
+			updateAdvisorStatus(ctx);
+
+			if (review.verdict === "APPROVE") {
+				pi.sendMessage(
+					{
+						customType: "advisor-review-report",
+						content: `[Independent Advisor (${review.modelKey}) — APPROVE]\nFiles: ${filesArray.join(", ")}\n\n${review.feedback}`,
+						display: true,
+					},
+					{ triggerTurn: false },
+				);
 				return;
 			}
-			if (review?.verdict === "REQUEST_CHANGES") {
+			if (review.verdict === "REQUEST_CHANGES") {
 				return {
 					entries: [
 						...event.entries,
 						{
 							type: "custom_message",
 							customType: "advisor-review-gate",
-							content: `[Independent Advisor (${review.modelKey}) — REQUEST_CHANGES]:\n${review.feedback}\n\nAddress the genuine issues above and re-run verification before finalizing.`,
+							content: `[Independent Advisor (${review.modelKey}) — REQUEST_CHANGES]\nFiles: ${filesArray.join(", ")}\n\n${review.feedback}\n\nAddress the genuine issues above and re-run verification before finalizing.`,
 							display: true,
 						},
 					],
 					continue: true,
 				};
 			}
-			// Fallback if advisor model was unavailable or diff empty
+			pi.sendMessage(
+				{
+					customType: "advisor-review-report",
+					content: `[Independent Advisor (${review.modelKey}) — SKIPPED/ERROR]\nFiles: ${filesArray.join(", ")}\n${review.feedback}`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
 			return;
 		}
 	});

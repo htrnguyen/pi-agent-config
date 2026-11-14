@@ -81,15 +81,7 @@ function formatCwd(cwd: string): string {
   return cwd;
 }
 
-function formatContextAndCost(ctx: ExtensionContext): { text: string; percent: number } {
-  const usage = ctx.getContextUsage();
-  const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
-  const percent = contextWindow && usage && usage.percent !== null ? Math.round(usage.percent) : 0;
-  const ctxPart =
-    contextWindow && usage && usage.percent !== null
-      ? `ctx ${percent}%/${(contextWindow / 1000).toFixed(0)}k`
-      : "ctx 0%";
-
+function computeSessionCost(ctx: ExtensionContext): number {
   let cost = 0;
   try {
     for (const e of ctx.sessionManager.getBranch()) {
@@ -101,6 +93,19 @@ function formatContextAndCost(ctx: ExtensionContext): { text: string; percent: n
   } catch {
     // ignore
   }
+  return cost;
+}
+
+function formatContextAndCost(ctx: ExtensionContext, precomputedCost?: number): { text: string; percent: number } {
+  const usage = ctx.getContextUsage();
+  const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow;
+  const percent = contextWindow && usage && usage.percent !== null ? Math.round(usage.percent) : 0;
+  const ctxPart =
+    contextWindow && usage && usage.percent !== null
+      ? `ctx ${percent}%/${(contextWindow / 1000).toFixed(0)}k`
+      : "ctx 0%";
+
+  const cost = precomputedCost ?? computeSessionCost(ctx);
   const costPart = cost > 0 ? ` · $${cost.toFixed(3)}` : "";
   return { text: `${ctxPart}${costPart}`, percent };
 }
@@ -222,6 +227,46 @@ export default function (pi: ExtensionAPI) {
   let compactingNow = false;
   let turnStartTime = 0;
   let lastTurnTokPerSec = 0;
+  let cachedRoles: Record<string, any> = readJson(ROLES_PATH);
+  let cachedStats: Record<string, ModelPerfEntry> = readJson(STATS_PATH) as Record<string, ModelPerfEntry>;
+  let cachedSessionCost = 0;
+  let lastDiskCacheAt = Date.now();
+  let taskPhase: "idle" | "working" | "done" = "idle";
+  let taskStartTime = 0;
+  let taskLastDurationSec = 0;
+  let taskActivity = "thinking";
+  let spinnerIdx = 0;
+  let taskTickTimer: ReturnType<typeof setInterval> | undefined;
+  const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+  function formatDuration(totalSec: number): string {
+    const s = Math.max(0, Math.floor(totalSec));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}m${rem < 10 ? "0" : ""}${rem}s`;
+  }
+
+  function stopTaskTicker() {
+    if (taskTickTimer) {
+      clearInterval(taskTickTimer);
+      taskTickTimer = undefined;
+    }
+  }
+
+  function describeToolActivity(toolName: string, input: Record<string, unknown> | undefined): string {
+    const p = typeof input?.path === "string" ? path.basename(input.path) : "";
+    if ((toolName === "read" || toolName === "write" || toolName === "edit") && p) {
+      const label = `${toolName} ${p}`;
+      return label.length > 24 ? `${label.slice(0, 23)}…` : label;
+    }
+    if (toolName === "bash" || toolName === "powershell") {
+      const rawCmd = typeof input?.command === "string" ? input.command.trim().split(/\s+/).slice(0, 2).join(" ") : "";
+      const label = rawCmd ? `${toolName} ${rawCmd}` : toolName;
+      return label.length > 24 ? `${label.slice(0, 23)}…` : label;
+    }
+    return toolName.length > 22 ? `${toolName.slice(0, 21)}…` : toolName;
+  }
   let liveActiveRole: string | undefined;
   let liveReadOnly: boolean | undefined;
 
@@ -288,16 +333,44 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_start", () => {
     clearIdleCompactTimer();
+    stopTaskTicker();
+    taskPhase = "working";
+    taskStartTime = Date.now();
+    taskActivity = "thinking";
+    spinnerIdx = 0;
+    taskTickTimer = setInterval(() => {
+      spinnerIdx = (spinnerIdx + 1) % SPINNER_FRAMES.length;
+      activeTui?.requestRender();
+    }, 500);
     activeTui?.requestRender();
   });
 
+  pi.on("tool_call", (event) => {
+    if (taskPhase === "working") {
+      taskActivity = describeToolActivity(event.toolName, event.input as Record<string, unknown> | undefined);
+      activeTui?.requestRender();
+    }
+  });
+
   pi.on("agent_settled", (_event, ctx) => {
+    stopTaskTicker();
+    taskPhase = "done";
+    taskLastDurationSec = taskStartTime > 0 ? Math.max(1, Math.round((Date.now() - taskStartTime) / 1000)) : 0;
+    taskActivity = "";
+    cachedRoles = readJson(ROLES_PATH);
+    cachedStats = readJson(STATS_PATH) as Record<string, ModelPerfEntry>;
+    cachedSessionCost = computeSessionCost(ctx);
+    lastDiskCacheAt = Date.now();
     activeTui?.requestRender();
     scheduleIdleCompact(ctx);
   });
 
   pi.on("turn_start", () => {
     turnStartTime = Date.now();
+    if (taskPhase === "working") {
+      taskActivity = "thinking";
+      activeTui?.requestRender();
+    }
   });
 
   pi.on("turn_end", (event, ctx) => {
@@ -375,6 +448,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     clearIdleCompactTimer();
+    stopTaskTicker();
     activeTui = undefined;
   });
 
@@ -637,8 +711,14 @@ export default function (pi: ExtensionAPI) {
         const lines = super.render(width);
         if (lines.length < 2) return lines;
 
+        const now = Date.now();
+        if (now - lastDiskCacheAt > 2000) {
+          cachedRoles = readJson(ROLES_PATH);
+          cachedStats = readJson(STATS_PATH) as Record<string, ModelPerfEntry>;
+          lastDiskCacheAt = now;
+        }
         const thm = ctx.ui.theme;
-        const roles = readJson(ROLES_PATH);
+        const roles = cachedRoles;
         const activeRole = liveActiveRole ?? String(roles.defaultRole ?? "default");
         const isReadOnly = liveReadOnly ?? Boolean(roles.modelRoles?.[activeRole]?.readOnly);
         const advisorOn = roles.advisorEnabled !== false;
@@ -659,12 +739,21 @@ export default function (pi: ExtensionAPI) {
         const effortPart = thm.fg(effortColor, effort);
         const advPart = advisorOn ? thm.fg("success", "adv:on") : thm.fg("dim", "adv:off");
 
-        const topLeft = ` ${rolePart} ${modelPart} ${thm.fg("dim", "·")} ${effortPart} `;
+        let taskStatusPart = "";
+        if (taskPhase === "working") {
+          const elapsed = taskStartTime > 0 ? Math.floor((Date.now() - taskStartTime) / 1000) : 0;
+          const spinner = SPINNER_FRAMES[spinnerIdx] ?? "⠋";
+          taskStatusPart = ` ${thm.fg("dim", "·")} ${thm.fg("accent", `${spinner} ${taskActivity}`)} ${thm.fg("warning", formatDuration(elapsed))}`;
+        } else if (taskPhase === "done" && taskLastDurationSec > 0) {
+          taskStatusPart = ` ${thm.fg("dim", "·")} ${thm.fg("success", `✓ done ${formatDuration(taskLastDurationSec)}`)}`;
+        }
+
+        const topLeft = ` ${rolePart} ${modelPart} ${thm.fg("dim", "·")} ${effortPart}${taskStatusPart} `;
         const topRight = ` ${advPart} `;
 
-        const ctxInfo = formatContextAndCost(ctx);
+        const ctxInfo = formatContextAndCost(ctx, cachedSessionCost);
         const ctxColor = ctxInfo.percent >= 80 ? "error" : ctxInfo.percent >= 60 ? "warning" : "muted";
-        const stats = readJson(STATS_PATH) as Record<string, ModelPerfEntry>;
+        const stats = cachedStats;
         const savedTps = stats[fullModelKey]?.avgTokPerSec;
         const tpsToShow = lastTurnTokPerSec || savedTps || 0;
         const tpsPart = tpsToShow > 0 ? ` · ${tpsToShow} tok/s` : "";

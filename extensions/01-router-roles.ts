@@ -402,12 +402,19 @@ export default function (pi: ExtensionAPI) {
 		const trimmed = event.text.trim();
 		if (!trimmed) return { action: "continue" };
 
-		// Tier 1: Minimal Gate (only skip pure short acknowledgements; let LLM Router classify all real tasks)
+		// Tier 1: Fast Gate — never block normal short/medium prompts on Enter.
+		// Only consult the LLM router when on a paid role (possible downgrade) OR prompt looks complex/architectural.
 		if (trimmed.length <= 35 && SHORT_FOLLOWUP_REGEX.test(trimmed)) {
 			return { action: "continue" };
 		}
 		const isCurrentlyPaid = adv.paidRoles.includes(currentRole);
-		if (!isCurrentlyPaid && trimmed.length < 20) {
+		const looksComplex =
+			trimmed.length >= 80 ||
+			trimmed.includes("\n") ||
+			/\b(kiến trúc|architecture|plan|kế hoạch|research|nghiên cứu|tìm hiểu|audit|review|bảo mật|security|refactor|debug|phân tích|design|thiết kế|so sánh|tradeoff)\b/i.test(
+				trimmed,
+			);
+		if (!isCurrentlyPaid && !looksComplex) {
 			return { action: "continue" };
 		}
 		if (suggestionsShownForRun >= adv.maxSuggestionsPerTask) {
